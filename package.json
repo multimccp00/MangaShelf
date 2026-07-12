@@ -1,0 +1,14 @@
+{
+  "name": "mangashelf-web",
+  "version": "1.0.0",
+  "description": "MangaShelf web frontend build (esbuild).",
+  "private": true,
+  "scripts": {
+    "build": "node build.js",
+    "watch": "node build.js --watch"
+  },
+  "license": "ISC",
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  }
+}

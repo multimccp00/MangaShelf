@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>MangaShelf</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/png" href="icons/custom-favicon-32.png?v=icon3" sizes="32x32" />
+  <link rel="icon" type="image/png" href="icons/custom-favicon-16.png?v=icon3" sizes="16x16" />
+  <link rel="apple-touch-icon" href="icons/custom-apple-touch-icon.png?v=icon3" />
+  <meta name="theme-color" content="#0b0b10" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Serif+JP:wght@400;500;700&family=Zen+Tokyo+Zoo&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css?v=web78" />
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Vendored locally so the app works offline / on the phone without internet -->
+  <script src="vendor/react.production.min.js"></script>
+  <script src="vendor/react-dom.production.min.js"></script>
+
+  <!-- Real data client (replaces the prototype's data.js) -->
+  <script src="api.js?v=web78"></script>
+
+  <!-- App bundle: the .jsx sources precompiled + minified by build.js.
+       Edit the .jsx files and run `npm run build` (or `npm run watch`) to regenerate. -->
+  <script src="app.bundle.js?v=web78"></script>
+</body>
+</html>
