@@ -5,7 +5,10 @@ const { useState: useStateRdr, useEffect: useEffectRdr, useRef: useRefRdr, useMe
 // `item` carries real chapters (loaded by Detail). Pages are flattened across
 // chapters into one continuous list so the slider/progress maps to a global page
 // number — last_page is tracked per series.
-function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage }) {
+// `previewSource` (a source name like "mangadex") switches the reader into
+// remote/preview mode: page `abs` values are source CDN URLs streamed through the
+// proxy, not local files. Progress/auto-status are disabled in preview mode.
+function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, previewSource }) {
   // Default to single-page mode: page state is the single source of truth, so
   // navigation (buttons/arrows/input/slider) is reliable. Vertical (webtoon)
   // scroll mode is available via the toggle.
@@ -303,7 +306,7 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage })
       if (!f) return;
       const img = new Image();
       img.decoding = "async";
-      img.src = window.pageUrl(f.abs);
+      img.src = previewSource ? window.ApiClient.previewPageUrl(f.abs, previewSource) : window.pageUrl(f.abs);
       imgs.push(img);
     });
     return () => { imgs.forEach((img) => { img.src = ""; }); };
@@ -384,7 +387,7 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage })
       <img
         data-page={p}
         className="page-img"
-        src={window.pageUrl(f.abs)}
+        src={previewSource ? window.ApiClient.previewPageUrl(f.abs, previewSource) : window.pageUrl(f.abs)}
         alt={`Page ${p}`}
         // Vertical/webtoon mode has hundreds of pages — lazy-load those. But in
         // single/double mode only 1–2 are shown, and lazy loading DELAYS the very
@@ -546,7 +549,7 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage })
 }
 
 // ====== Search Panel ======
-function SearchPanel({ onClose, onOpenDetail, onImportLink, initialQuery }) {
+function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initialQuery }) {
   const [q, setQ] = useStateRdr(initialQuery || "");
   const isUrl = /^https?:\/\//i.test(q.trim());
   // Debounced copy of the query drives the actual filtering, so typing fast in a
@@ -561,9 +564,33 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, initialQuery }) {
   const [activeStatus, setActiveStatus] = useStateRdr(new Set());
   const [activeGenre, setActiveGenre] = useStateRdr(new Set());
   const [sort, setSort] = useStateRdr("random");
+  // Web search (MangaDex etc.) — only run on demand, never automatically.
+  const [webResults, setWebResults] = useStateRdr(null);   // null=not searched, []=no hits
+  const [webBusy, setWebBusy] = useStateRdr(false);
+  const [webErr, setWebErr] = useStateRdr("");
 
   const all = window.STORE.items;
   const facets = window.STORE.facets;
+
+  // Reset web results whenever the query changes (they're for the old query).
+  useEffectRdr(() => { setWebResults(null); setWebErr(""); }, [debouncedQ]);
+
+  function searchWeb() {
+    const query = q.trim();
+    if (!query) return;
+    setWebBusy(true); setWebErr(""); setWebResults(null);
+    window.ApiClient.searchWeb(query)
+      .then((r) => setWebResults((r && r.results) || []))
+      .catch((e) => {
+        // A raw "404 /api/…" means the server predates this feature — say so
+        // plainly instead of showing the URL.
+        const msg = String(e && e.message || e);
+        setWebErr(/^404\b/.test(msg)
+          ? "Web search needs the server restarted to enable it."
+          : `Web search failed: ${msg}`);
+      })
+      .finally(() => setWebBusy(false));
+  }
 
   // A stable random ordering of every series, computed once per panel-open.
   // (Recomputing on each render would reshuffle as you type.) Maps id -> rank.
@@ -703,7 +730,7 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, initialQuery }) {
 
         <div className="search-panel-body">
           {results.length === 0 ? (
-            <div className="empty"><div className="glyph">無</div><p>No matches. Try removing a filter.</p></div>
+            <div className="empty"><div className="glyph">無</div><p>Not in your library. Search the web to import it.</p></div>
           ) : (
             <>
               <div className="grid density-dense">
@@ -717,6 +744,53 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, initialQuery }) {
                 </div>
               )}
             </>
+          )}
+
+          {/* Search the web (MangaDex etc.) — on-demand. Shown when there's a
+              non-URL query, most useful when few/no local matches. */}
+          {!isUrl && debouncedQ.trim() && (
+            <div className="web-search-section">
+              {webResults === null ? (
+                <button className="web-search-btn" disabled={webBusy} onClick={searchWeb}>
+                  <window.IconSearch size={15} />
+                  {webBusy ? "Searching the web…" : `Search the web for “${debouncedQ.trim()}”`}
+                </button>
+              ) : (
+                <>
+                  <div className="web-search-head">
+                    <span>Web results {webResults.length > 0 ? `· ${webResults.length}` : ""}</span>
+                    <button className="btn ghost sm" onClick={searchWeb} disabled={webBusy}>
+                      {webBusy ? "…" : "Search again"}
+                    </button>
+                  </div>
+                  {webResults.length === 0 ? (
+                    <div className="web-search-empty">No results found online for “{debouncedQ.trim()}”.</div>
+                  ) : (
+                    <div className="web-results">
+                      {webResults.map((r, i) => (
+                        <button key={r.url || i} className="web-result-card"
+                          title={`Preview “${r.title}” from ${r.source_label}`}
+                          onClick={() => { onClose(); (onPreviewLink || onImportLink)?.(r.url); }}>
+                          <div className="web-result-cover">
+                            {r.cover_url
+                              ? <img src={r.cover_url} alt="" referrerPolicy="no-referrer" loading="lazy" />
+                              : <div className="web-result-noart">本</div>}
+                          </div>
+                          <div className="web-result-meta">
+                            <div className="web-result-title">{r.title}</div>
+                            <div className="web-result-sub">
+                              {r.author || "Unknown"}{r.year ? ` · ${r.year}` : ""}
+                            </div>
+                            <div className="web-result-badge">{r.source_label}</div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+              {webErr && <div className="web-search-empty" style={{ color: "var(--vermillion)" }}>{webErr}</div>}
+            </div>
           )}
         </div>
     </window.Modal>

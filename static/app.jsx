@@ -1,6 +1,10 @@
 /* global window, React, ReactDOM */
 const { useState, useEffect, useRef } = React;
 
+// Bump on every frontend release; shown tiny in the corner so we can confirm which
+// bundle a browser is actually running (ends cache-vs-code guessing).
+const BUILD_VERSION = "web84";
+
 // One background-job channel: polls a status endpoint while a job is active and
 // exposes start/dismiss. Used once per concurrent job type (import, move) so they
 // track independently — finishing a move never clears the import's indicator.
@@ -52,6 +56,83 @@ function useJobChannel(fetchStatus, onComplete) {
   return { active, status, titles, start, dismiss };
 }
 
+// ---------------------------------------------------------------------------
+// Read-before-import preview. Shows a source series' cover/description/chapter
+// list (fetched with no download). Click a chapter → it streams live into the
+// reader (proxied). "Import" hands off to the normal import flow. Nothing is
+// saved to disk unless the user imports.
+function PreviewModal({ data, onClose, onReadChapter, onImport }) {
+  const [loadingCh, setLoadingCh] = useState(null);   // chapter index being fetched
+  const chapters = data.chapters || [];
+
+  function readChapter(ch) {
+    if (loadingCh != null) return;
+    setLoadingCh(ch.index);
+    window.ApiClient.previewPages(data.source, ch.id, ch.number, ch.title)
+      .then((r) => {
+        const pages = (r && r.pages) || [];
+        if (!pages.length) { window.toast("This chapter has no readable pages.", "error"); return; }
+        // Build a reader item with ONE chapter whose pages are the remote URLs.
+        const item = {
+          id: null, title: data.title,
+          chapters: [{ name: ch.number ? `Chapter ${ch.number}` : (ch.title || "Chapter"),
+                       page_count: pages.length, pages }],
+          read: 0, pages: pages.length,
+        };
+        onReadChapter(item, 1, pages.length);
+      })
+      .catch((e) => window.toast(`Couldn't load chapter: ${e.message || e}`, "error"))
+      .finally(() => setLoadingCh(null));
+  }
+
+  return (
+    <window.Modal onClose={onClose} panelClass="preview-modal" labelledBy="preview-title">
+      <div className="preview-head">
+        <div className="preview-cover">
+          {data.cover_url
+            ? <img src={data.cover_url} alt="" referrerPolicy="no-referrer" />
+            : <div className="preview-noart">本</div>}
+        </div>
+        <div className="preview-info">
+          <div className="preview-badge">{data.source_label} · preview</div>
+          <h2 id="preview-title" className="preview-title">{data.title}</h2>
+          <div className="preview-sub">
+            {data.author || "Unknown"} · {chapters.length} chapters
+          </div>
+          {data.genres && data.genres.length > 0 && (
+            <div className="preview-genres">{data.genres.slice(0, 8).join(" · ")}</div>
+          )}
+          {data.description && <p className="preview-desc">{data.description}</p>}
+          <div className="preview-actions">
+            <button className="btn primary" onClick={() => onImport(data.url)}>
+              <window.IconPlus size={14} /> {data.already ? "Already in library — import again" : "Import to library"}
+            </button>
+            <a className="btn ghost sm" href={data.url} target="_blank" rel="noreferrer">Open source ↗</a>
+          </div>
+          <div className="preview-hint">Reading a chapter streams it live — nothing is downloaded until you import.</div>
+        </div>
+        <button className="icon-btn preview-close" onClick={onClose} title="Close"><window.IconClose size={16} /></button>
+      </div>
+
+      <div className="preview-chapters-head">Chapters — click to read</div>
+      <div className="preview-chapters">
+        {chapters.length === 0 && <div className="preview-empty">No chapters found.</div>}
+        {chapters.map((ch) => (
+          <button key={ch.index} className="preview-chapter" disabled={loadingCh != null}
+            onClick={() => readChapter(ch)}>
+            <window.IconPlay size={11} />
+            <span className="preview-chapter-name">
+              {ch.number ? `Chapter ${ch.number}` : (ch.title || `Chapter ${ch.index + 1}`)}
+              {ch.title && ch.number ? ` · ${ch.title}` : ""}
+            </span>
+            {loadingCh === ch.index && <span className="preview-chapter-loading">loading…</span>}
+          </button>
+        ))}
+      </div>
+    </window.Modal>
+  );
+}
+
 function App() {
   // useTweaks is shimmed (tweaks-shim.jsx) — holds local UI prefs only.
   const [t, setTweak] = window.useTweaks({
@@ -69,6 +150,16 @@ function App() {
   const [rescanOpen, setRescanOpen] = useState(false);
   const [addLinkOpen, setAddLinkOpen] = useState(false);
   const [addLinkUrl, setAddLinkUrl] = useState("");   // prefill when opened from a pasted link
+  const [preview, setPreview] = useState(null);       // {source,title,chapters,...} for read-before-import
+
+  // Open a read-before-import preview for a source URL: fetch its chapter list
+  // (no download) and show the preview modal. Errors surface as a toast.
+  function openPreview(url) {
+    setSearchOpen(false);
+    window.ApiClient.previewSeries(url)
+      .then((d) => setPreview(d))
+      .catch((e) => window.toast(`Couldn't preview: ${e.message || e}`, "error"));
+  }
   // Open the import dialog, optionally pre-filled with a pasted URL. Closes the
   // search overlay if it was open (so pasting a link in search jumps to import).
   function openAddLink(url) {
@@ -349,6 +440,7 @@ function App() {
           onClose={() => setSearchOpen(false)}
           onOpenDetail={openDetail}
           onImportLink={openAddLink}
+          onPreviewLink={openPreview}
           initialQuery={searchQuery}
         />
       )}
@@ -358,8 +450,18 @@ function App() {
           startPage={reader.startPage}
           endPage={reader.endPage}
           resumePage={reader.resumePage}
+          previewSource={reader.previewSource}
           bg={t.readerBg}
-          onClose={() => { setReader(null); setTimeout(reload, 350); }}
+          onClose={() => { setReader(null); if (!reader.previewSource) setTimeout(reload, 350); }}
+        />
+      )}
+      {preview && (
+        <PreviewModal
+          data={preview}
+          onClose={() => setPreview(null)}
+          onReadChapter={(item, startPage, endPage) =>
+            setReader({ item, startPage, endPage, previewSource: preview.source })}
+          onImport={(url) => { setPreview(null); openAddLink(url); }}
         />
       )}
       {rescanOpen && (
@@ -416,6 +518,8 @@ function App() {
           gearOnly={!showSwitcher}
         />
       )}
+      {/* Tiny build tag so we can confirm which bundle a browser is running. */}
+      <div className="build-tag" title="App version">{BUILD_VERSION}</div>
     </div>
   );
 }

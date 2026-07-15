@@ -184,8 +184,22 @@ function authHeaders(base) {
   return h;
 }
 
+// A 401 on an authenticated call means our stored token is stale/invalid (e.g. a
+// password was set after we logged in, or the token rotated). Clear it and boot
+// to the login screen instead of leaving the app half-broken (grid from cache but
+// details failing to load). Guard so we only redirect once.
+let _handling401 = false;
+function handleAuthFailure() {
+  if (_handling401) return;
+  _handling401 = true;
+  try { clearAuthToken(); } catch (e) {}
+  // Reload — with no token + password required, the app boots to the login gate.
+  try { window.location.reload(); } catch (e) {}
+}
+
 async function getJSON(url) {
   const res = await fetch(url, { headers: authHeaders() });
+  if (res.status === 401) { handleAuthFailure(); throw new Error(`401 ${url}`); }
   if (!res.ok) throw new Error(`${res.status} ${url}`);
   return res.json();
 }
@@ -196,6 +210,7 @@ async function postJSON(url, body) {
     headers: authHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
+  if (res.status === 401) { handleAuthFailure(); throw new Error("401"); }
   if (!res.ok) {
     // Surface the server's error detail (FastAPI puts it in {detail}) so the UI
     // can show "folder already exists" etc. instead of a bare status code.
@@ -403,6 +418,26 @@ const ApiClient = {
   // --- import a series from a link ---
   listSources() {
     return getJSON(`${API}/sources`);
+  },
+  // Search searchable sources (MangaDex, etc.) by title to find series not yet in
+  // the library. Returns {results:[{title,author,cover_url,url,source_label,...}], searchable}.
+  searchWeb(query) {
+    return getJSON(`${API}/search-web?q=${encodeURIComponent(query)}`);
+  },
+  // --- read-before-import (preview) ---
+  // Metadata + chapter list for a source URL, no download. For the preview detail.
+  previewSeries(url) {
+    return postJSON(`${API}/preview/series`, { url });
+  },
+  // Page image URLs for ONE chapter, fetched live (no download). Pass the source
+  // name + chapter id from previewSeries.
+  previewPages(source, chapterId, number, title) {
+    return postJSON(`${API}/preview/pages`, { source, chapter_id: chapterId, number: number || "", title: title || "" });
+  },
+  // Reader src for a remote preview page — proxied through our server (Referer/CORS
+  // handled server-side). `pageUrl` is a source CDN URL from previewPages.
+  previewPageUrl(pageUrl, source) {
+    return `${API}/preview/page?url=${encodeURIComponent(pageUrl)}&source=${encodeURIComponent(source || "")}${tokenParam(true)}`;
   },
   // --- Source extensions (user-installed declarative site manifests) ---
   listExtensions() {

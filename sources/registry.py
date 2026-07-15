@@ -142,6 +142,35 @@ def find_by_name(name: str) -> MangaSource | None:
     return None
 
 
+def search_all(query: str, limit: int = 20) -> list[dict[str, object]]:
+    """Search every source that supports title search (can_search), combine the
+    results, and return them as plain dicts for the API. Sources that don't search
+    (most of them) are skipped. A failing source is skipped, never fatal."""
+    query = (query or "").strip()
+    if not query:
+        return []
+    out: list[dict[str, object]] = []
+    for s in _all():
+        if not getattr(s, "can_search", False):
+            continue
+        try:
+            for r in s.search(query, limit=limit):
+                out.append({
+                    "source": r.source, "source_label": r.source_label,
+                    "title": r.title, "url": r.url, "author": r.author,
+                    "cover_url": r.cover_url, "description": r.description,
+                    "year": r.year,
+                })
+        except Exception as exc:  # noqa: BLE001
+            print(f"[sources] search failed for {s.name!r}: {exc}")
+    return out
+
+
+def any_searchable() -> bool:
+    """True if at least one loaded source supports title search."""
+    return any(getattr(s, "can_search", False) for s in _all())
+
+
 # ---------------------------------------------------- extension management --
 # These back the /api/sources/extensions endpoints. All validate before touching
 # disk, write atomically, and reload() so changes take effect immediately.

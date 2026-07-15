@@ -108,6 +108,7 @@ def download_series(
             "author": meta.author,
             "genres": list(meta.genres or []),
             "tags": list(meta.tags or []),
+            "parodies": list(getattr(meta, "parodies", None) or []),
             "notes": meta.description,
             "external_id": f"{meta.source}:{meta.external_id}",
         })

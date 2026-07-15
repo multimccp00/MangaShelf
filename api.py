@@ -40,6 +40,7 @@ import pdf_support  # noqa: E402
 from sources.registry import (  # noqa: E402
     find_source, list_sources, find_by_name, source_info,
     install_extension, remove_extension, set_extension_enabled, list_extensions,
+    search_all, any_searchable,
 )
 from sources.downloader import download_series  # noqa: E402
 
@@ -1700,6 +1701,18 @@ def sources() -> list[dict[str, str]]:
     return list_sources()
 
 
+@app.get("/api/search-web", dependencies=[Depends(require_token)])
+def search_web(q: str = "", limit: int = 20) -> dict[str, Any]:
+    """Search searchable sources (e.g. MangaDex) by title, so a user can find and
+    import a series that isn't in their library yet. Returns combined results; pick
+    one and import it via the normal /api/scrape flow using its `url`."""
+    q = (q or "").strip()
+    if not q:
+        return {"results": [], "searchable": any_searchable()}
+    results = search_all(q, limit=min(int(limit or 20), 50))
+    return {"results": results, "searchable": any_searchable()}
+
+
 # ----------------------------------------------- user Source extensions --
 # A "Source extension" is a declarative JSON manifest describing how to read a
 # manga site. It's interpreted by the safe DeclarativeSource engine — it can never
@@ -1805,6 +1818,105 @@ def scrape_preview(body: ScrapePreviewIn) -> dict[str, Any]:
         "external_id": external_id,
         "already": already,
     }
+
+
+# ---------------------------------------------- read-before-import (preview) --
+# Let the user READ a series from a source without importing it: fetch its chapter
+# list on demand, and stream one chapter's pages live (proxied through us so the
+# source's Referer/headers apply and there are no CORS/hotlink issues). Nothing is
+# written to disk unless the user then imports.
+
+@app.post("/api/preview/series", dependencies=[Depends(require_token)])
+def preview_series(body: ScrapePreviewIn) -> dict[str, Any]:
+    """Full metadata + the CHAPTER LIST for a source URL (no page downloads), so the
+    UI can show a browsable chapter list to read before importing."""
+    url = (body.url or "").strip()
+    src = find_source(url)
+    if not src:
+        raise HTTPException(status_code=400, detail="No import source recognizes this link.")
+    try:
+        meta = src.fetch_series(url)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Could not read the series: {exc}")
+    external_id = f"{meta.source}:{meta.external_id}"
+    existing = _db.series_by_external_id(external_id)
+    chapters = [
+        {"index": i, "id": c.id, "number": c.number, "title": c.title,
+         "language": c.language, "url": c.url}
+        for i, c in enumerate(meta.chapters)
+    ]
+    return {
+        "source": src.name, "source_label": src.label, "url": url,
+        "title": meta.title, "author": meta.author, "genres": meta.genres,
+        "cover_url": meta.cover_url, "description": meta.description,
+        "external_id": external_id,
+        "already": ({"id": existing["id"], "title": existing["title"]} if existing else None),
+        "chapters": chapters,
+    }
+
+
+class PreviewPagesIn(BaseModel):
+    source: str          # adapter name (from preview/series)
+    chapter_id: str      # the chapter's source id
+    number: str = ""
+    title: str = ""
+
+
+@app.post("/api/preview/pages", dependencies=[Depends(require_token)])
+def preview_pages(body: PreviewPagesIn) -> dict[str, Any]:
+    """Page image URLs for ONE chapter (fetched live from the source), plus the
+    per-source image headers, so the reader can stream that chapter without a
+    full import. The URLs are returned as proxy tokens the reader loads via
+    /api/preview/page (see below)."""
+    src = find_by_name(body.source)
+    if not src:
+        raise HTTPException(status_code=400, detail="Unknown source.")
+    from sources.base import ChapterMeta  # local import — light
+    ch = ChapterMeta(id=body.chapter_id, number=body.number, title=body.title)
+    try:
+        urls = src.fetch_pages(ch)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Could not read this chapter: {exc}")
+    return {"pages": list(urls), "count": len(urls)}
+
+
+# Cap a proxied page fetch so a bad URL can't stream unbounded into memory.
+_MAX_PROXY_BYTES = 40 * 1024 * 1024
+
+
+@app.get("/api/preview/page", dependencies=[Depends(require_token_read)])
+def preview_page(url: str = Query(...), source: str = Query("")):
+    """Proxy a single remote page image through the server (applying the source's
+    Referer/headers), so the reader can display it via a normal <img> without CORS
+    or hotlink problems. SSRF-guarded + size-capped; used only for preview reading."""
+    import urllib.request
+    from urllib.parse import urlparse as _up
+    # SSRF guard: only fetch public http(s) hosts.
+    try:
+        from sources.ai import _is_public_url
+        if not (url.startswith("http") and _is_public_url(url)):
+            raise HTTPException(status_code=400, detail="Refusing to fetch that address.")
+    except HTTPException:
+        raise
+    except Exception:
+        if not url.startswith("http"):
+            raise HTTPException(status_code=400, detail="Bad URL.")
+    headers = {"User-Agent": "MangaShelf/1.0"}
+    src = find_by_name(source) if source else None
+    if src:
+        headers.update(src.image_headers() or {})
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=45) as r:
+            data = r.read(_MAX_PROXY_BYTES + 1)
+            ctype = r.headers.get("Content-Type", "image/jpeg")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=502, detail=f"Page fetch failed: {exc}")
+    if len(data) > _MAX_PROXY_BYTES:
+        raise HTTPException(status_code=413, detail="Page too large.")
+    from fastapi.responses import Response
+    return Response(content=data, media_type=ctype,
+                    headers={"Cache-Control": "public, max-age=3600"})
 
 
 # ------------------------------------------------------------- import queue --

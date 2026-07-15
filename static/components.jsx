@@ -156,6 +156,15 @@ function CoverImg({ item, onLoad }) {
       className="img cover-img"
       src={window.coverUrl(item)}
       alt={item.title}
+      // Lazy-load + low priority: a big library renders 60 cards at once. Without
+      // this the browser fires 60 cover requests immediately, saturating its ~6
+      // connections/host — so a getSeries() API call (opening a detail) QUEUES
+      // behind them and appears to "load forever". Lazy loading only fetches
+      // covers as they scroll into view, keeping the connection pool free for
+      // navigation/API calls.
+      loading="lazy"
+      decoding="async"
+      fetchpriority="low"
       onLoad={onLoad}
       onError={() => setErr(true)}
     />

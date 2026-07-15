@@ -35,9 +35,24 @@ class SeriesMeta:
     author: str = ""
     genres: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    parodies: list[str] = field(default_factory=list)   # source works this parodies/collaborates on
     description: str = ""
     cover_url: str = ""
     chapters: list[ChapterMeta] = field(default_factory=list)
+
+
+@dataclass
+class SearchResult:
+    """One hit from a source's title search — lightweight, no chapter list.
+    The `url` feeds the existing import-preview/import flow when the user picks it."""
+    source: str                 # adapter name that produced this hit
+    source_label: str           # human label for a badge ("MangaDex")
+    title: str
+    url: str                    # canonical series URL → import via the normal flow
+    author: str = ""
+    cover_url: str = ""
+    description: str = ""
+    year: str = ""
 
 
 class MangaSource(ABC):
@@ -62,6 +77,16 @@ class MangaSource(ABC):
     @abstractmethod
     def fetch_pages(self, chapter: ChapterMeta) -> list[str]:
         """Return the ordered list of page-image URLs for one chapter."""
+
+    #: True if this source can search by title (drives the "search the web" UI).
+    #: Sources that can search override search() and set this True.
+    can_search: bool = False
+
+    def search(self, query: str, limit: int = 20) -> list["SearchResult"]:
+        """Search this source by title. OPTIONAL — default returns nothing.
+        Only sources with a real search API/endpoint implement this (e.g. MangaDex).
+        Must not download anything; returns lightweight SearchResults to preview."""
+        return []
 
     def image_headers(self) -> dict[str, str]:
         """Extra HTTP headers required to fetch this source's images (e.g. a

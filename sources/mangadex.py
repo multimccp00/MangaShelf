@@ -14,7 +14,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from .base import ChapterMeta, MangaSource, SeriesMeta
+from .base import ChapterMeta, MangaSource, SearchResult, SeriesMeta
 
 _API = "https://api.mangadex.org"
 _UPLOADS = "https://uploads.mangadex.org"
@@ -42,9 +42,103 @@ class MangaDexSource(MangaSource):
     name = "mangadex"
     label = "MangaDex"
     example = "https://mangadex.org/title/<id>"
+    can_search = True
 
     def matches(self, url: str) -> bool:
         return "mangadex.org" in url and bool(_UUID_RE.search(url))
+
+    def search(self, query: str, limit: int = 20) -> list[SearchResult]:
+        """Title search via MangaDex's official /manga endpoint. Returns lightweight
+        results (title/author/cover/url); the chapter list is only fetched later when
+        the user picks one to import (via the normal fetch_series flow).
+
+        MangaDex matches titles fairly literally, so a spacing difference misses (e.g.
+        "high school of the dead" won't find "Highschool of the Dead"). We query the
+        original plus common spelling variants and merge, de-duped by manga id, so the
+        obvious match surfaces regardless of how the user typed it."""
+        query = (query or "").strip()
+        if not query:
+            return []
+        variants = self._spelling_variants(query)
+        # Gather from EVERY variant (so a spacing-fixed variant that finds the exact
+        # match isn't crowded out by the first variant's fuzzy hits), de-dupe by id,
+        # then rank by closeness to the query so the obvious match floats to the top.
+        seen: set[str] = set()
+        gathered: list[SearchResult] = []
+        for variant in variants:
+            for r in self._run_search(variant, limit):
+                if r.url in seen:
+                    continue
+                seen.add(r.url)
+                gathered.append(r)
+
+        import difflib
+        def _norm(s: str) -> str:
+            return "".join(ch for ch in s.lower() if ch.isalnum())
+        nq = _norm(query)
+        def _score(r: SearchResult) -> float:
+            nt = _norm(r.title)
+            if nt == nq:
+                return 1.0                      # exact (ignoring spaces/case)
+            ratio = difflib.SequenceMatcher(None, nq, nt).ratio()
+            if nq and nq in nt:
+                ratio += 0.3                    # query is a substring of the title
+            return ratio
+        gathered.sort(key=_score, reverse=True)
+        return gathered[:limit]
+
+    @staticmethod
+    def _spelling_variants(query: str) -> list[str]:
+        """The original query first, then near-variants that catch spacing/joining
+        differences MangaDex is picky about. Order = search priority."""
+        q = query.strip()
+        variants = [q]
+        collapsed = q.replace(" ", "")
+        if collapsed != q:
+            variants.append(collapsed)
+        # Join just the first two words (handles "high school" -> "highschool").
+        parts = q.split()
+        if len(parts) >= 2:
+            joined_first = parts[0] + parts[1] + ("" if len(parts) == 2 else " " + " ".join(parts[2:]))
+            if joined_first not in variants:
+                variants.append(joined_first)
+        return variants
+
+    def _run_search(self, title: str, limit: int) -> list[SearchResult]:
+        qs = urllib.parse.urlencode(
+            [("title", title), ("limit", min(int(limit), 50)),
+             ("includes[]", "author"), ("includes[]", "cover_art"),
+             ("order[relevance]", "desc"),
+             ("contentRating[]", "safe"), ("contentRating[]", "suggestive"),
+             ("contentRating[]", "erotica")],
+        )
+        try:
+            j = _get(f"{_API}/manga?{qs}")
+        except Exception:
+            return []
+        out: list[SearchResult] = []
+        for data in j.get("data", []):
+            mid = data.get("id")
+            attr = data.get("attributes", {})
+            title = _first_localized(attr.get("title", {})) or "Untitled"
+            year = str(attr.get("year") or "")
+            desc = _first_localized(attr.get("description", {}))
+            author = ""
+            cover_file = ""
+            for rel in data.get("relationships", []):
+                ra = rel.get("attributes", {}) or {}
+                if rel.get("type") == "author" and not author:
+                    author = ra.get("name", "") or author
+                elif rel.get("type") == "cover_art":
+                    cover_file = ra.get("fileName", "") or cover_file
+            # 256px thumbnail keeps the search grid light.
+            cover_url = f"{_UPLOADS}/covers/{mid}/{cover_file}.256.jpg" if cover_file else ""
+            out.append(SearchResult(
+                source=self.name, source_label=self.label, title=title,
+                url=self.url_for(mid), author=author, cover_url=cover_url,
+                description=desc[:300], year=year,
+            ))
+        return out
 
     def url_for(self, external_id: str) -> str:
         return f"https://mangadex.org/title/{external_id}" if external_id else ""

@@ -231,9 +231,9 @@ function Detail({ item: initialItem, libraries = [], onBack, onMoveStarted, onOp
   const [tab, setTab] = useStateDtl("chapters");
   const [fav, setFav] = useStateDtl(!!initialItem.favorite);
   const [status, setStatus] = useStateDtl(initialItem.status || "Not Started");
-  // Empty metadata rows (no values yet) are hidden behind a single "+ Add details"
-  // toggle so a scanned local series doesn't lead with five empty "+ Add" prompts.
-  const [showEmptyMeta, setShowEmptyMeta] = useStateDtl(false);
+  // Bumped when facets refresh after a metadata save, forcing a re-render so the
+  // pill usage-counts (e.g. how many series use "Fairy Tail") reflect the new value.
+  const [facetTick, setFacetTick] = useStateDtl(0);
   // Render chapters in chunks of exactly 4 rows. Each card has a thumbnail (a PDF
   // page render for PDF chapters), so mounting many at once lags — but the column
   // count differs per breakpoint (8 desktop → 2 tiny phone), so a fixed number
@@ -325,10 +325,21 @@ function Detail({ item: initialItem, libraries = [], onBack, onMoveStarted, onOp
       patchStoreItem(field === "series" ? { series: v, series_name: v } : { [field]: v });
     };
     apply(value);
-    window.ApiClient.saveMetadata(item.id, { [field]: value }).catch((e) => {
-      apply(prev);
-      window.toast(`Save failed: ${e.message || e}`, "error");
-    });
+    window.ApiClient.saveMetadata(item.id, { [field]: value })
+      .then(() => {
+        // Refresh the facets so a newly-added series/tag/genre shows up in the
+        // filter dropdowns + autocomplete right away (otherwise it only appears
+        // after a full reload). Fire-and-forget; the value is already applied.
+        if (window.ApiClient.getFacets) {
+          window.ApiClient.getFacets()
+            .then((f) => { if (f) { window.STORE.facets = f; setFacetTick((n) => n + 1); } })
+            .catch(() => {});
+        }
+      })
+      .catch((e) => {
+        apply(prev);
+        window.toast(`Save failed: ${e.message || e}`, "error");
+      });
   }
 
   // Rename the series. This renames the folder on disk, so we wait for the server
@@ -602,19 +613,27 @@ function Detail({ item: initialItem, libraries = [], onBack, onMoveStarted, onOp
               usage counts. Single-value rows (Parodies/Artists/Languages) edit in
               place; multi-value rows (Tags/Genres) add/remove with autocomplete. */}
           {(() => {
-            // Which editable rows currently have values? Empty ones are collapsed
-            // behind the "+ Add details" toggle unless the user expands them.
-            const has = {
-              Parodies: (item.parodies || []).length > 0,
-              Tags: (item.tags || []).length > 0,
-              Genres: (item.genres || []).length > 0,
-              Artists: !!item.author,
-              Languages: !!item.language,
-            };
-            const anyEmpty = Object.values(has).some((v) => !v);
-            const vis = (k) => has[k] || showEmptyMeta;
+            // Always show every metadata row (with empty "+ Add" fields when a
+            // field has no value yet) so you can always add tags/genres/etc.
+            // (No collapse — hiding empty fields meant you couldn't add to them.)
+            const vis = () => true;
             return (
           <div className="info-table">
+            {/* Series — groups multiple entries under one series name (e.g. all
+                "Fairy Tail" doujinshi). Single value; type or pick an existing
+                series name. This is the "add series to mangas" feature. */}
+            {vis("Series") && (
+            <InfoRow label="Series">
+              <TokenEditor
+                single addLabel="series"
+                values={item.series ? [item.series] : []}
+                counts={window.STORE.facets.series_counts || {}}
+                suggestions={window.STORE.facets.series || []}
+                onChange={(arr) => saveField("series", arr[0] || "")}
+              />
+            </InfoRow>
+            )}
+
             {/* Parodies — multi-value: a work can parody/collaborate on several
                 source series, so this is a full add/remove list with autocomplete. */}
             {vis("Parodies") && (
@@ -677,17 +696,6 @@ function Detail({ item: initialItem, libraries = [], onBack, onMoveStarted, onOp
                 onChange={(arr) => saveField("language", arr[0] || "")}
               />
             </InfoRow>
-            )}
-
-            {/* Collapsed-empty affordance: one quiet line instead of N empty "+ Add"
-                rows. Reveals the empty editors when clicked. */}
-            {anyEmpty && !showEmptyMeta && (
-              <div className="info-row info-add-more">
-                <div className="info-label" />
-                <button className="detail-add-details" onClick={() => setShowEmptyMeta(true)}>
-                  <window.IconPlus size={12} /> Add details
-                </button>
-              </div>
             )}
 
             {/* Pages */}
@@ -807,6 +815,10 @@ function TokenEditor({ values, counts, suggestions, color, onChange, single, add
 
   return (
     <div className="token-editor">
+      {/* Only render the pills row when it has content (values or the +Add button).
+          When editing an EMPTY field, this row would otherwise be an empty box that
+          adds height + a gap above the input — the "space is too big" issue. */}
+      {(values.length > 0 || showAdd) && (
       <div className="token-pills">
         {values.map((v) => (
           <span key={v} className="token-pill" style={pillStyle}>
@@ -817,6 +829,7 @@ function TokenEditor({ values, counts, suggestions, color, onChange, single, add
           <button className="token-add" onClick={() => setAdding(true)}>+ {addLabel || "Add"}</button>
         )}
       </div>
+      )}
       {adding && (
         <div className="token-add-box">
           <input

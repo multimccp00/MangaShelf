@@ -260,7 +260,7 @@ function Library({ onOpenDetail, onOpenSearch, density, setDensity }) {
         </div>
       </div>
 
-      <div className={`grid density-${density}`} style={{ marginTop: 22 }}>
+      <div className={`grid density-${density} library-grid`}>
         {items.slice(0, limit).map((c) => <window.LibraryCard key={c.id} item={c} onOpen={onOpenDetail} onDeleted={() => setDelTick((n) => n + 1)} />)}
       </div>
 
