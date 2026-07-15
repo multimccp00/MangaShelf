@@ -424,6 +424,11 @@ const ApiClient = {
   searchWeb(query) {
     return getJSON(`${API}/search-web?q=${encodeURIComponent(query)}`);
   },
+  // Readable chapter count for one web-search result, fetched lazily per card so
+  // the search grid isn't held up (see /api/chapter-count). Returns {count}.
+  chapterCount(source, url) {
+    return getJSON(`${API}/chapter-count?source=${encodeURIComponent(source)}&url=${encodeURIComponent(url)}`);
+  },
   // --- read-before-import (preview) ---
   // Metadata + chapter list for a source URL, no download. For the preview detail.
   previewSeries(url) {

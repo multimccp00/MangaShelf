@@ -25,7 +25,7 @@ This mirrors how the mature apps in this space handle it (Tachiyomi/Mihon extens
 | **Private dev adapter** | `sources/local/*.py` (git-ignored) | Machine owner only | No | ✅ exists — keep for your own use |
 | **AI fallback** | LLM infers rules for an unknown site | App author | Yes | ✅ exists |
 
-The existing `sources/local/*.py` path **stays** — it's how *you* (the trusted operator) run private adapters like the piracy/adult ones. What's new is the safe, shareable, user-installable declarative tier.
+The existing `sources/local/*.py` path **stays** — it's how the trusted operator runs private, unofficial adapters maintained for their own use (never committed). What's new is the safe, shareable, user-installable declarative tier.
 
 ---
 

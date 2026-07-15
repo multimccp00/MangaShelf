@@ -63,11 +63,14 @@ Write-Host ""
 
 $env:MANGASHELF_HOST = $tsIp
 $env:MANGASHELF_PORT = "$port"
-# Auto-reload for development: run this script with -Reload (or set
-# $env:MANGASHELF_RELOAD="1" first) to have the server restart itself whenever you
-# edit a source file — no manual restart needed. Off by default.
-if ($args -contains "-Reload" -or $args -contains "-reload") {
+# Auto-reload is ON by default: the server watches its source files and restarts
+# itself whenever they change, so backend edits take effect WITHOUT a manual
+# restart. Pass -NoReload to disable it (uses the hardened graceful-shutdown path
+# instead — better for a long-lived "production" run).
+if ($args -contains "-NoReload" -or $args -contains "-noreload") {
+    $env:MANGASHELF_RELOAD = "0"
+    $args = $args | Where-Object { $_ -ne "-NoReload" -and $_ -ne "-noreload" }
+} else {
     $env:MANGASHELF_RELOAD = "1"
-    $args = $args | Where-Object { $_ -ne "-Reload" -and $_ -ne "-reload" }
 }
 & "$PSScriptRoot\..\.venv\Scripts\python.exe" "$PSScriptRoot\server.py" @args

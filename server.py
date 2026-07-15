@@ -103,13 +103,40 @@ def main() -> None:
 
     if reload:
         # Reload mode needs the app as an import STRING (uvicorn spawns a reloader
-        # process that re-imports it on change). Watch this dir + the project root
-        # so both the web code and the core library modules trigger a reload.
-        this_dir = str(Path(__file__).resolve().parent)
-        root_dir = str(Path(__file__).resolve().parent.parent)
+        # process that re-imports it on change).
+        #
+        # IMPORTANT: watch NARROWLY. The previous version also watched the whole
+        # project root, which includes .venv/ (~3k files) and the manga library —
+        # on Windows the watchfiles observer gets overwhelmed by that many paths and
+        # silently STOPS delivering change events, so the worker never restarts and
+        # reload appears "broken" (you'd still have to restart by hand). We watch
+        # only our own source folders, and explicitly EXCLUDE heavy/irrelevant trees
+        # and non-source files, so every real .py edit reliably triggers a reload.
+        this_dir = Path(__file__).resolve().parent      # web/
+        root_dir = this_dir.parent                       # project root (core .py live here)
+        reload_dirs = [
+            str(this_dir),                               # web/ (api.py, server.py, static build)
+            str(this_dir / "sources"),                   # adapters incl. sources/local/*
+            str(root_dir),                               # database.py, scanner.py, sidecar.py, …
+        ]
+        # Only *.py triggers a reload; everything below never does. Excluding .venv,
+        # caches, the DB/library, and generated assets is what keeps the watcher from
+        # drowning (and stops a DB write or cover download from bouncing the server).
+        reload_excludes = [
+            "*/.venv/*", "*/.git/*", "*/__pycache__/*",
+            "*/_ai_cache/*", "*/.playwright/*", "*/_cdp*/*",
+            "*.db", "*.sqlite*", "*.log", "*.json",
+            "*/static/*",                                # built bundle/assets, not server code
+            "*/models/*", "*/portfolio-shots/*",
+        ]
+        # NOTE: reload mode intentionally skips the custom SIGTERM/graceful-shutdown
+        # hardening below — uvicorn's reloader manages its own signals, and reload is
+        # a local-dev-only convenience (not the remote/production run).
         uvicorn.run(
             "api:app", host=host, port=port, reload=True,
-            reload_dirs=[this_dir, root_dir],
+            reload_dirs=reload_dirs,
+            reload_includes=["*.py"],
+            reload_excludes=reload_excludes,
             timeout_graceful_shutdown=2,
         )
         return

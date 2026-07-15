@@ -701,6 +701,12 @@ function NewReadsRailCard({ item, onOpen, onStatusChange }) {
   );
 }
 
+// A stack of open modals so that when several are nested (e.g. a preview opened
+// ON TOP of the search panel), only the TOPMOST responds to Escape and gets the
+// higher z-index — instead of Escape closing both at once and the two overlays
+// sharing a stacking level.
+const _MODAL_STACK = [];
+
 // ---------------------------------------------------------------------------
 // Accessible modal shell: overlay + dialog with a focus trap, focus restore on
 // close, Escape-to-dismiss, and the proper dialog ARIA. Content-agnostic — pass
@@ -709,8 +715,17 @@ function NewReadsRailCard({ item, onOpen, onStatusChange }) {
 function Modal({ onClose, panelClass, labelledBy, children, dismissable = true }) {
   const panelRef = useRef(null);
   const restoreRef = useRef(null);
+  const idRef = useRef(null);
+  // Depth in the modal stack when this one mounted → a z-index above any modal
+  // opened before it, so a nested modal always paints over its parent.
+  const [depth, setDepth] = useState(0);
 
   useEffect(() => {
+    // Register on the modal stack; the last-registered is the "topmost".
+    const id = {};
+    idRef.current = id;
+    _MODAL_STACK.push(id);
+    setDepth(_MODAL_STACK.length - 1);
     // Remember what was focused so we can restore it when the modal closes.
     restoreRef.current = document.activeElement;
     const panel = panelRef.current;
@@ -722,8 +737,14 @@ function Modal({ onClose, panelClass, labelledBy, children, dismissable = true }
     const first = focusables()[0];
     (first || panel)?.focus();
 
+    function isTopmost() {
+      return _MODAL_STACK[_MODAL_STACK.length - 1] === idRef.current;
+    }
+
     function onKey(e) {
-      if (e.key === "Escape" && dismissable) { e.preventDefault(); onClose?.(); return; }
+      // Only the topmost modal reacts to Escape, so a nested preview closes without
+      // also dismissing the search panel underneath it.
+      if (e.key === "Escape" && dismissable && isTopmost()) { e.preventDefault(); onClose?.(); return; }
       if (e.key !== "Tab") return;
       // Trap Tab within the panel.
       const els = focusables();
@@ -739,13 +760,20 @@ function Modal({ onClose, panelClass, labelledBy, children, dismissable = true }
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
+      // Unregister from the modal stack (remove THIS one, wherever it sits).
+      const i = _MODAL_STACK.indexOf(idRef.current);
+      if (i !== -1) _MODAL_STACK.splice(i, 1);
       // Restore focus to the trigger when the modal unmounts.
       if (restoreRef.current && restoreRef.current.focus) restoreRef.current.focus();
     };
   }, []);
 
+  // Lift each stacked modal above the one below it. Base 40 matches the overlay's
+  // CSS z-index; +1 per depth keeps a nested modal (and its backdrop) on top.
+  const overlayStyle = depth > 0 ? { zIndex: 40 + depth } : undefined;
+
   return (
-    <div className="search-overlay" onClick={dismissable ? onClose : undefined}>
+    <div className="search-overlay" style={overlayStyle} onClick={dismissable ? onClose : undefined}>
       <div
         className={panelClass}
         ref={panelRef}
@@ -763,7 +791,7 @@ function Modal({ onClose, panelClass, labelledBy, children, dismissable = true }
 
 // ---------------------------------------------------------------------------
 // Themed confirmation dialog — replaces the browser's native window.confirm()
-// (the ugly "100.127.143.26:8000 says…" box). Used imperatively:
+// (the ugly "<host>:<port> says…" box). Used imperatively:
 //
 //   const ok = await window.confirmDialog({
 //     title: "Switch library?",
@@ -838,7 +866,7 @@ function confirmDialog(opts) {
 
 // ---------------------------------------------------------------------------
 // Themed toast notifications — replace window.alert() (the ugly native
-// "100.127.143.26:8000 says…" box) for transient feedback. Imperative, mounts
+// "<host>:<port> says…" box) for transient feedback. Imperative, mounts
 // into its own root so it's callable from anywhere:
 //
 //   window.toast("Cover upload failed: …", "error");   // "error" | "warn" | "ok"

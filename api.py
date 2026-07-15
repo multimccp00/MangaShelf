@@ -1713,6 +1713,16 @@ def search_web(q: str = "", limit: int = 20) -> dict[str, Any]:
     return {"results": results, "searchable": any_searchable()}
 
 
+@app.get("/api/chapter-count", dependencies=[Depends(require_token_read)])
+def chapter_count(source: str = "", url: str = "") -> dict[str, Any]:
+    """Readable chapter count for ONE web-search result, resolved on demand. The
+    search grid renders immediately and calls this per card so each "· N ch" fills
+    in lazily (fetching all counts up front would rate-limit and stall search).
+    Returns {count} where count is -1 if unknown/unsupported."""
+    from sources.registry import chapter_count_for
+    return {"count": chapter_count_for(source, url)}
+
+
 # ----------------------------------------------- user Source extensions --
 # A "Source extension" is a declarative JSON manifest describing how to read a
 # manga site. It's interpreted by the safe DeclarativeSource engine — it can never
@@ -1845,8 +1855,17 @@ def preview_series(body: ScrapePreviewIn) -> dict[str, Any]:
          "language": c.language, "url": c.url}
         for i, c in enumerate(meta.chapters)
     ]
+    # A source may resolve chapters from a DIFFERENT adapter than the one that owns
+    # the URL (e.g. AniList supplies metadata but hands off to MangaDex for readable
+    # pages). The reader must fetch pages from the adapter that produced the chapters
+    # (meta.source), so page-fetch (preview/pages) is dispatched there — while the
+    # UI badge still shows where the entry was FOUND (src.label).
+    page_src = find_by_name(meta.source) if meta.source else None
     return {
-        "source": src.name, "source_label": src.label, "url": url,
+        "source": meta.source if page_src else src.name,
+        "source_label": src.label,
+        "found_via": src.name,
+        "url": url,
         "title": meta.title, "author": meta.author, "genres": meta.genres,
         "cover_url": meta.cover_url, "description": meta.description,
         "external_id": external_id,
@@ -1890,17 +1909,14 @@ def preview_page(url: str = Query(...), source: str = Query("")):
     Referer/headers), so the reader can display it via a normal <img> without CORS
     or hotlink problems. SSRF-guarded + size-capped; used only for preview reading."""
     import urllib.request
-    from urllib.parse import urlparse as _up
-    # SSRF guard: only fetch public http(s) hosts.
+    # SSRF guard — FAIL CLOSED: if the guard itself can't run, reject rather than
+    # fetch. Only proxy public http(s) hosts (no localhost/LAN/metadata).
     try:
         from sources.ai import _is_public_url
-        if not (url.startswith("http") and _is_public_url(url)):
-            raise HTTPException(status_code=400, detail="Refusing to fetch that address.")
-    except HTTPException:
-        raise
     except Exception:
-        if not url.startswith("http"):
-            raise HTTPException(status_code=400, detail="Bad URL.")
+        raise HTTPException(status_code=503, detail="Proxy unavailable (SSRF guard could not load).")
+    if not (url.startswith("http") and _is_public_url(url)):
+        raise HTTPException(status_code=400, detail="Refusing to fetch that address.")
     headers = {"User-Agent": "MangaShelf/1.0"}
     src = find_by_name(source) if source else None
     if src:
@@ -1915,8 +1931,11 @@ def preview_page(url: str = Query(...), source: str = Query("")):
     if len(data) > _MAX_PROXY_BYTES:
         raise HTTPException(status_code=413, detail="Page too large.")
     from fastapi.responses import Response
+    # private (this is an authenticated response — a shared cache must not serve it
+    # to another user), and short-lived (source page URLs like MangaDex at-home
+    # tokens rotate, so a long cache could go stale/404).
     return Response(content=data, media_type=ctype,
-                    headers={"Cache-Control": "public, max-age=3600"})
+                    headers={"Cache-Control": "private, max-age=600"})
 
 
 # ------------------------------------------------------------- import queue --
@@ -1928,6 +1947,59 @@ _JOB_CV = threading.Condition(_JOB_LOCK)
 _JOBS: list[dict[str, Any]] = []       # queued + running + recently finished
 _JOB_NEXT_ID = 1
 _JOB_WORKER_STARTED = False
+
+# Persist the import queue to disk so it SURVIVES A SERVER RESTART: a job that was
+# queued/running when the server stopped is re-queued on startup (the download
+# itself is resumable — files already on disk are skipped). Without this, a restart
+# mid-import loses the queue + its progress indicator entirely.
+_JOBS_PATH = Path.home() / ".mangashelf" / "web_import_queue.json"
+# Only these fields are needed to reconstruct/resume a job (progress/message are
+# transient and rebuilt as it runs).
+_JOB_PERSIST_KEYS = ("id", "kind", "title", "url", "library_id", "library_root",
+                     "source", "folder")
+
+
+def _save_jobs() -> None:
+    """Persist queued + running jobs (finished ones don't need to survive)."""
+    try:
+        with _JOB_LOCK:
+            keep = [{k: j.get(k) for k in _JOB_PERSIST_KEYS}
+                    for j in _JOBS if j["status"] in ("queued", "running")]
+        tmp = _JOBS_PATH.with_suffix(".json.tmp")
+        _JOBS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(_json.dumps(keep), encoding="utf-8")
+        _os.replace(tmp, _JOBS_PATH)
+    except Exception:
+        pass
+
+
+def _restore_jobs() -> None:
+    """On startup, re-queue any jobs that were in flight when the server stopped."""
+    global _JOB_NEXT_ID, _JOB_WORKER_STARTED
+    try:
+        if not _JOBS_PATH.exists():
+            return
+        saved = _json.loads(_JOBS_PATH.read_text(encoding="utf-8")) or []
+    except Exception:
+        return
+    if not isinstance(saved, list) or not saved:
+        return
+    with _JOB_CV:
+        for s in saved:
+            if not isinstance(s, dict) or not s.get("kind"):
+                continue
+            job = {
+                "id": _JOB_NEXT_ID, "status": "queued",
+                "chapter": 0, "total": 0, "pages": 0,
+                "message": "Resuming after restart…", "error": None, "done_message": "Done.",
+                **{k: s.get(k) for k in _JOB_PERSIST_KEYS if k != "id"},
+            }
+            _JOB_NEXT_ID += 1
+            _JOBS.append(job)
+        if _JOBS and not _JOB_WORKER_STARTED:
+            _JOB_WORKER_STARTED = True
+            threading.Thread(target=_job_worker, name="import-queue", daemon=True).start()
+        _JOB_CV.notify_all()
 
 
 def _job_set(job: dict[str, Any], **fields: Any) -> None:
@@ -1950,7 +2022,8 @@ def _enqueue_job(kind: str, **fields: Any) -> dict[str, Any]:
             _JOB_WORKER_STARTED = True
             threading.Thread(target=_job_worker, name="import-queue", daemon=True).start()
         _JOB_CV.notify_all()
-        return job
+    _save_jobs()   # persist so a restart mid-queue doesn't lose this job
+    return job
 
 
 def _execute_job(job: dict[str, Any], scan_and_sync) -> None:
@@ -1975,9 +2048,13 @@ def _execute_job(job: dict[str, Any], scan_and_sync) -> None:
             raise ValueError("No import source recognizes this link.")
         _job_set(job, message="Reading series…")
         meta = src.fetch_series(job["url"])
+        # A source can resolve chapters from a DIFFERENT adapter (e.g. AniList hands
+        # off to MangaDex for readable pages). Download pages using the adapter that
+        # actually owns the chapters (meta.source), falling back to the URL adapter.
+        page_src = find_by_name(meta.source) or src
         _job_set(job, title=meta.title, total=len(meta.chapters),
                  message=f"Downloading {len(meta.chapters)} chapters…")
-        result = download_series(src, meta, job["library_root"], progress=progress)
+        result = download_series(page_src, meta, job["library_root"], progress=progress)
         job["done_message"] = f"Imported “{meta.title}”."
 
     # Note any pages/chapters that couldn't be downloaded, so it isn't silently
@@ -2018,6 +2095,7 @@ def _job_worker() -> None:
                 job = next((j for j in _JOBS if j["status"] == "queued"), None)
             job["status"] = "running"
             job["message"] = "Starting…"
+        _save_jobs()   # mark running (survives a restart mid-download)
         try:
             _execute_job(job, scan_and_sync)
             with _JOB_LOCK:
@@ -2033,6 +2111,12 @@ def _job_worker() -> None:
             finished = [j for j in _JOBS if j["status"] in ("done", "error")]
             for old in finished[:-10]:
                 _JOBS.remove(old)
+        _save_jobs()   # a finished job drops out of the persisted (queued/running) set
+
+
+# Rehydrate the queue from disk now that the worker fn exists — re-queues any
+# import that was in flight when the server last stopped.
+_restore_jobs()
 
 
 def _scrape_status() -> dict[str, Any]:
@@ -2094,11 +2178,16 @@ def scrape_status() -> dict[str, Any]:
 def cancel_job(job_id: int) -> dict[str, Any]:
     """Remove a QUEUED import/re-sync job. A job that's already running can't be
     cancelled this way (it finishes)."""
+    removed = False
     with _JOB_LOCK:
         for j in _JOBS:
             if j["id"] == job_id and j["status"] == "queued":
                 _JOBS.remove(j)
-                return {"ok": True}
+                removed = True
+                break
+    if removed:
+        _save_jobs()
+        return {"ok": True}
     raise HTTPException(status_code=404, detail="No queued job with that id (it may have already started).")
 
 

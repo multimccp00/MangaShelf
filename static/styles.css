@@ -2988,6 +2988,17 @@ textarea.detail-field-input {
   font-size: 13px;
   font-weight: 600;
   transition: background 140ms, border-color 140ms;
+  /* Both states ("Searching the web…" vs. "Search the web for …") must be the
+     SAME size — the searching state is the reference. Cap the width and clip the
+     long idle query so the pill doesn't balloon. */
+  max-width: 320px;
+  min-width: 0;
+}
+.web-search-btn .web-search-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .web-search-btn:hover:not(:disabled) { background: rgba(239, 59, 59, 0.2); border-color: var(--vermillion); }
 .web-search-btn:disabled { opacity: 0.7; cursor: default; }
@@ -3033,7 +3044,22 @@ textarea.detail-field-input {
 .web-result-noart { width: 100%; height: 100%; display: grid; place-items: center; font-family: var(--font-jp); color: var(--faint); font-size: 24px; }
 .web-result-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .web-result-title { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.25; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.web-result-sub { font-size: 11px; color: var(--muted); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Author truncates; the year is protected so it never cuts mid-digit ("· 1…"). */
+.web-result-sub { font-size: 11px; color: var(--muted); font-family: var(--font-mono); white-space: nowrap; display: flex; min-width: 0; }
+.web-result-author { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.web-result-year { flex-shrink: 0; }
+/* Chapter count must never be truncated — it's the whole point of showing it. */
+.web-result-chapters { flex-shrink: 0; color: var(--jade); font-weight: 600; }
+/* Quiet "no local matches" line shown above web results (replaces the full-height
+   無 empty-state so web results get the primary vertical space). */
+.search-nolocal { color: var(--muted); font-size: 12.5px; padding: 6px 0 2px; font-family: var(--font-mono); }
+/* PREVIEW tag in the reader top bar so remote/preview reading is unmistakable. */
+.reader-preview-tag {
+  display: inline-block; margin-right: 8px; vertical-align: middle;
+  font-size: 9px; font-weight: 700; letter-spacing: 0.06em;
+  color: var(--jade); border: 1px solid rgba(110,212,168,0.5);
+  border-radius: 999px; padding: 1px 6px;
+}
 .web-result-badge { margin-top: auto; align-self: flex-start; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--jade); border: 1px solid rgba(110, 212, 168, 0.4); border-radius: 999px; padding: 2px 8px; }
 
 /* === Read-before-import preview modal === */
@@ -3066,17 +3092,57 @@ textarea.detail-field-input {
 .preview-actions { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
 .preview-hint { font-size: 11px; color: var(--muted); margin-top: 8px; font-style: italic; }
 .preview-close { position: absolute; top: 14px; right: 14px; }
-.preview-chapters-head { padding: 14px 20px 8px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-family: var(--font-mono); flex-shrink: 0; }
+
+/* --- Preview loading skeleton (shown while the chapter feed is fetched) --- */
+.preview-spinner {
+  display: inline-block; width: 15px; height: 15px; vertical-align: -2px;
+  margin-right: 6px; border-radius: 50%;
+  border: 2px solid var(--ink-3); border-top-color: var(--vermillion);
+  animation: preview-spin 0.7s linear infinite;
+}
+@keyframes preview-spin { to { transform: rotate(360deg); } }
+.preview-skel {
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--ink-2) 25%, var(--ink-3) 37%, var(--ink-2) 63%);
+  background-size: 400% 100%;
+  animation: preview-shimmer 1.3s ease-in-out infinite;
+}
+@keyframes preview-shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+.preview-skel-cover { width: 100%; height: 100%; border-radius: 8px; }
+.preview-skel-line { height: 13px; margin: 9px 0; }
+.preview-skel-chapter { height: 34px; margin-bottom: 6px; }
+@media (prefers-reduced-motion: reduce) {
+  .preview-spinner, .preview-skel { animation: none; }
+}
+/* Right padding = grid's 20px + the 8px scrollbar gutter reserved below
+   (scrollbar-gutter: stable + ::-webkit-scrollbar width: 8px), so the filter bar's
+   right edge lines up with the last chapter column's right edge. */
+.preview-chapters-head { padding: 14px 28px 8px 20px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-family: var(--font-mono); flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.preview-ch-filter {
+  text-transform: none; letter-spacing: normal;
+  height: 26px; width: 160px; padding: 0 10px;
+  background: var(--ink-2); border: 1px solid var(--ink-3); border-radius: 6px;
+  color: var(--text); font-size: 12px; outline: none;
+}
+.preview-ch-filter:focus { border-color: var(--vermillion); }
 .preview-chapters {
   overflow-y: auto;
   padding: 0 20px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
+  /* Reserve the scrollbar gutter always, so the grid's content right edge stays put
+     whether or not the list scrolls — and aligns with the header (which has no
+     scrollbar) once the header's right inset matches (see .preview-chapters-head). */
+  scrollbar-gutter: stable;
+  /* Grid: multiple chapters per row on a wide modal so a 400-chapter list isn't
+     one endless single column. Auto-fits ~2-3 columns; collapses to 1 when narrow. */
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 4px 8px;
+  align-content: start;
   /* Thin, subtle scrollbar to match the rest of the app (the one scroll region). */
   scrollbar-width: thin;
   scrollbar-color: var(--ink-3) transparent;
 }
+.preview-empty { grid-column: 1 / -1; }
 .preview-chapters::-webkit-scrollbar { width: 8px; }
 .preview-chapters::-webkit-scrollbar-track { background: transparent; }
 .preview-chapters::-webkit-scrollbar-thumb { background: var(--ink-3); border-radius: 8px; border: 2px solid var(--ink-1); }
@@ -4000,6 +4066,31 @@ textarea.detail-field-input {
 @media (max-width: 640px) {
   /* Tighter page padding to reclaim horizontal space. */
   .page { padding: 16px 14px 56px; }
+
+  /* --- Preview modal on phones: the desktop side-by-side (big cover + text)
+     crams the info into a narrow column and wraps buttons to 3 lines. Shrink the
+     cover, let text use full width, and stack the action buttons full-width. --- */
+  .preview-modal { width: 96vw; max-height: 90vh; }
+  .preview-head { gap: 12px; padding: 14px; }
+  .preview-cover { width: 88px; }
+  .preview-title { font-size: 18px; }
+  .preview-desc { -webkit-line-clamp: 3; }
+  .preview-actions { flex-direction: column; align-items: stretch; gap: 8px; }
+  .preview-actions .btn { width: 100%; white-space: nowrap; justify-content: center; }
+  .preview-actions .btn.primary { padding: 10px 12px; }
+  .preview-close { top: 10px; right: 10px; }
+  .preview-chapters { grid-template-columns: 1fr; padding: 0 14px 16px; }
+  .preview-chapters-head { padding: 12px 14px 8px; flex-wrap: wrap; }
+  .preview-ch-filter { width: 100%; }
+
+  /* Web-search results on phones. The header packs "Web results · N · MangaDex"
+     and a "Search again" button on one row via space-between; on a narrow screen
+     the source name at the tail gets clipped and effectively DISAPPEARS. Let the
+     row wrap so the source label ("· MangaDex") always stays visible, and give the
+     result cards a single full-width column. */
+  .web-search-head { flex-wrap: wrap; gap: 6px 10px; }
+  .web-search-head > span { flex: 1 1 100%; white-space: normal; overflow-wrap: anywhere; }
+  .web-results { grid-template-columns: 1fr; }
   /* Extra top padding so the floating "MANGA SHELF" wordmark (which sits ~28px
      above the search box) clears the phone browser's address bar. The safe-area
      inset covers notches / dynamic browser chrome. */

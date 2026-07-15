@@ -408,6 +408,7 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
         <button className="icon-btn" onClick={handleClose} title="Back"><window.IconArrowLeft size={18} /></button>
         <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {previewSource && <span className="reader-preview-tag">PREVIEW</span>}
             {item.title}
           </div>
           <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", fontFamily: "var(--font-mono)" }}>
@@ -415,9 +416,10 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
           </div>
         </div>
         <div className="reader-controls">
-          {/* Prev/next CHAPTER — switch chapters without leaving the reader.
-              Shown only when reading a single chapter that has a neighbour. */}
-          {curChapterIdx >= 0 && (hasPrevChapter || hasNextChapter) && (
+          {/* Prev/next CHAPTER — switch chapters without leaving the reader. Shown
+              only when reading a single chapter that has a neighbour. Hidden in
+              preview mode (only one chapter is loaded there). */}
+          {!previewSource && curChapterIdx >= 0 && (hasPrevChapter || hasNextChapter) && (
             <div className="reader-chapter-nav">
               <button
                 className="btn sm"
@@ -433,6 +435,9 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
               >Next ch <window.IconChevronRight size={15} /></button>
             </div>
           )}
+          {/* Split (needs a real, imported series with a folder on disk) — hidden
+              in preview mode where item.id is null. */}
+          {!previewSource && (
           <button
             className="btn sm"
             style={{ fontSize: 11, opacity: 0.75 }}
@@ -453,6 +458,7 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
                 .catch((e) => window.toast(`Split failed: ${e.message || e}`, "error"));
             }}
           ><window.IconScissors size={13} /> End Chap Here</button>
+          )}
           <div className="reader-mode-toggle">
             {[
               { id: "vertical", label: "縦 Vert" },
@@ -548,6 +554,14 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
   );
 }
 
+// Web-result / preview cover with a graceful fallback tile (source CDNs sometimes
+// hotlink-protect thumbnails → a broken <img> otherwise).
+function WebCover({ url }) {
+  const [err, setErr] = useStateRdr(false);
+  if (!url || err) return <div className="web-result-noart">本</div>;
+  return <img src={url} alt="" referrerPolicy="no-referrer" loading="lazy" onError={() => setErr(true)} />;
+}
+
 // ====== Search Panel ======
 function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initialQuery }) {
   const [q, setQ] = useStateRdr(initialQuery || "");
@@ -575,13 +589,21 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
   // Reset web results whenever the query changes (they're for the old query).
   useEffectRdr(() => { setWebResults(null); setWebErr(""); }, [debouncedQ]);
 
+  const webReqRef = useRefRdr(0);
   function searchWeb() {
     const query = q.trim();
     if (!query) return;
+    const myReq = ++webReqRef.current;   // stale-guard: ignore superseded responses
     setWebBusy(true); setWebErr(""); setWebResults(null);
     window.ApiClient.searchWeb(query)
-      .then((r) => setWebResults((r && r.results) || []))
+      .then((r) => {
+        if (myReq !== webReqRef.current) return;
+        const results = (r && r.results) || [];
+        setWebResults(results);
+        loadChapterCounts(results, myReq);   // fill "· N ch" lazily, per card
+      })
       .catch((e) => {
+        if (myReq !== webReqRef.current) return;
         // A raw "404 /api/…" means the server predates this feature — say so
         // plainly instead of showing the URL.
         const msg = String(e && e.message || e);
@@ -589,7 +611,27 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
           ? "Web search needs the server restarted to enable it."
           : `Web search failed: ${msg}`);
       })
-      .finally(() => setWebBusy(false));
+      .finally(() => { if (myReq === webReqRef.current) setWebBusy(false); });
+  }
+
+  // Resolve each result's readable chapter count separately (the search itself
+  // doesn't, to stay fast) and patch it into state so "· N ch" appears as it
+  // arrives. Keyed by url; guarded by the same request id so a stale search's
+  // counts can't overwrite a newer one.
+  function loadChapterCounts(results, myReq) {
+    results.forEach((r) => {
+      if (!r || !r.url || (typeof r.chapter_count === "number" && r.chapter_count >= 0)) return;
+      window.ApiClient.chapterCount(r.source, r.url)
+        .then((res) => {
+          const count = res && typeof res.count === "number" ? res.count : -1;
+          if (myReq !== webReqRef.current || count < 0) return;
+          setWebResults((prev) =>
+            Array.isArray(prev)
+              ? prev.map((x) => (x.url === r.url ? { ...x, chapter_count: count } : x))
+              : prev);
+        })
+        .catch(() => {});   // a failed count just leaves that card unlabelled
+    });
   }
 
   // A stable random ordering of every series, computed once per panel-open.
@@ -728,10 +770,18 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
           </div>
         </div>
 
+        {(() => {
+          // Do web results exist? If so, they become the PRIMARY content and the
+          // local-library empty-state collapses to a single quiet line — instead
+          // of a full-height 無 placeholder burying the results below the fold.
+          const hasWeb = Array.isArray(webResults) && webResults.length > 0;
+          // Are all web results from ONE source? Then show the source once in the
+          // header, not a badge on every card.
+          const webSources = hasWeb ? [...new Set(webResults.map((r) => r.source_label))] : [];
+          const singleSource = webSources.length === 1;
+          return (
         <div className="search-panel-body">
-          {results.length === 0 ? (
-            <div className="empty"><div className="glyph">無</div><p>Not in your library. Search the web to import it.</p></div>
-          ) : (
+          {results.length > 0 ? (
             <>
               <div className="grid density-dense">
                 {shown.map((c) => (
@@ -744,6 +794,11 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
                 </div>
               )}
             </>
+          ) : hasWeb ? (
+            // No local matches but we have web results → just a quiet line, results below.
+            <div className="search-nolocal">No matches in your library — showing web results below.</div>
+          ) : (
+            <div className="empty"><div className="glyph">無</div><p>Not in your library. Search the web to import it.</p></div>
           )}
 
           {/* Search the web (MangaDex etc.) — on-demand. Shown when there's a
@@ -753,12 +808,14 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
               {webResults === null ? (
                 <button className="web-search-btn" disabled={webBusy} onClick={searchWeb}>
                   <window.IconSearch size={15} />
-                  {webBusy ? "Searching the web…" : `Search the web for “${debouncedQ.trim()}”`}
+                  <span className="web-search-label">
+                    {webBusy ? "Searching the web…" : `Search the web for “${debouncedQ.trim()}”`}
+                  </span>
                 </button>
               ) : (
                 <>
                   <div className="web-search-head">
-                    <span>Web results {webResults.length > 0 ? `· ${webResults.length}` : ""}</span>
+                    <span>Web results{webResults.length > 0 ? ` · ${webResults.length}` : ""}{singleSource ? ` · ${webSources[0]}` : ""}</span>
                     <button className="btn ghost sm" onClick={searchWeb} disabled={webBusy}>
                       {webBusy ? "…" : "Search again"}
                     </button>
@@ -770,18 +827,20 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
                       {webResults.map((r, i) => (
                         <button key={r.url || i} className="web-result-card"
                           title={`Preview “${r.title}” from ${r.source_label}`}
-                          onClick={() => { onClose(); (onPreviewLink || onImportLink)?.(r.url); }}>
-                          <div className="web-result-cover">
-                            {r.cover_url
-                              ? <img src={r.cover_url} alt="" referrerPolicy="no-referrer" loading="lazy" />
-                              : <div className="web-result-noart">本</div>}
-                          </div>
+                          onClick={() => { (onPreviewLink || onImportLink)?.(r.url); }}>
+                          <div className="web-result-cover"><WebCover url={r.cover_url} /></div>
                           <div className="web-result-meta">
                             <div className="web-result-title">{r.title}</div>
                             <div className="web-result-sub">
-                              {r.author || "Unknown"}{r.year ? ` · ${r.year}` : ""}
+                              <span className="web-result-author">{r.author || "Unknown"}</span>
+                              {r.year ? <span className="web-result-year"> · {r.year}</span> : null}
+                              {typeof r.chapter_count === "number" && r.chapter_count >= 0 ? (
+                                <span className="web-result-chapters"> · {r.chapter_count} ch</span>
+                              ) : null}
                             </div>
-                            <div className="web-result-badge">{r.source_label}</div>
+                            {/* Per-card badge only when results span MULTIPLE sources
+                                (otherwise the source is in the header). */}
+                            {!singleSource && <div className="web-result-badge">{r.source_label}</div>}
                           </div>
                         </button>
                       ))}
@@ -793,6 +852,8 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
             </div>
           )}
         </div>
+          );
+        })()}
     </window.Modal>
   );
 }

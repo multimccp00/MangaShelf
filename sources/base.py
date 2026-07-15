@@ -53,6 +53,18 @@ class SearchResult:
     cover_url: str = ""
     description: str = ""
     year: str = ""
+    # Readable chapter count for this hit, when known. -1 = "not fetched yet"
+    # (some sources fill it for free during search; others resolve it separately
+    # via MangaSource.chapter_count()). Shown on the result card so the user can
+    # tell "1 chapter here" from "124" before clicking.
+    chapter_count: int = -1
+    # How well this hit matches the query, 0.0–1.0, per the source's OWN matching
+    # (which can see alt/translated titles the display `title` doesn't show — e.g.
+    # matching English "my dress up darling" to a romaji-titled series). -1.0 = the
+    # source didn't score it, so combined search should fall back to comparing the
+    # query against the display title. Set this whenever a source ranks internally
+    # against titles other than the one it displays.
+    match_score: float = -1.0
 
 
 class MangaSource(ABC):
@@ -82,11 +94,27 @@ class MangaSource(ABC):
     #: Sources that can search override search() and set this True.
     can_search: bool = False
 
+    #: Relevance weight for combined web search (search_all). Higher = preferred
+    #: when two sources match the query equally well. It's only a tie-breaker: a
+    #: better title match from a lower-priority source still ranks above a weaker
+    #: match from a higher-priority one. Default 0; a full-library source that hosts
+    #: complete chapter runs (e.g. Weeb Central) can raise it so its hit for a series
+    #: sorts above a source that only has a stub for the same title.
+    priority: int = 0
+
     def search(self, query: str, limit: int = 20) -> list["SearchResult"]:
         """Search this source by title. OPTIONAL — default returns nothing.
         Only sources with a real search API/endpoint implement this (e.g. MangaDex).
         Must not download anything; returns lightweight SearchResults to preview."""
         return []
+
+    def chapter_count(self, url: str) -> int:
+        """How many READABLE chapters this series URL has. OPTIONAL — return -1 if
+        unknown/unsupported. Used to annotate search cards so the user can see the
+        real chapter count (e.g. 1 vs 124) before opening a result. Should be cheap
+        (a single lightweight request); it's called per result, concurrently, under
+        a short deadline. Must NOT download page images."""
+        return -1
 
     def image_headers(self) -> dict[str, str]:
         """Extra HTTP headers required to fetch this source's images (e.g. a

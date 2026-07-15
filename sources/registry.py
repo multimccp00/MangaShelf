@@ -13,18 +13,28 @@ from __future__ import annotations
 import importlib
 import json
 import pkgutil
+import threading
 from pathlib import Path
 
+from .anilist import AniListSource
 from .base import MangaSource
 from .mangadex import MangaDexSource
 
 # Adapters that ship with the app (sources exposing an official public API).
-_BUILTIN: list[type[MangaSource]] = [MangaDexSource]
+# MangaDex reads pages; AniList adds English-first search + metadata and hands off
+# to MangaDex for the readable chapter feed. AniList is listed FIRST so that when
+# the same series is found on both, its English-titled result is the one shown
+# (search_all de-dupes by title, first source wins). URL routing (find_source) is
+# unaffected — each adapter only matches its own domain.
+_BUILTIN: list[type[MangaSource]] = [AniListSource, MangaDexSource]
 
 # User-installed declarative Sources live here (NOT in the repo — per install,
 # same app-data dir as covers/settings). One *.json manifest per site.
 EXTENSIONS_DIR = Path.home() / ".mangashelf" / "extensions"
 
+# Guards the cached source list: FastAPI serves across a threadpool, so a request
+# iterating _all() must not race an extension install/reload rebuilding it.
+_sources_lock = threading.RLock()
 _sources: list[MangaSource] | None = None
 # Reasons manifests were skipped at last load, surfaced to the manage UI:
 #   [{"file": "...", "error": "..."}]
@@ -83,7 +93,13 @@ def _load_extensions(into: list[MangaSource]) -> None:
 
 def _all() -> list[MangaSource]:
     global _sources
-    if _sources is None:
+    # Double-checked under the lock so two threads can't both rebuild (which would
+    # run _load_extensions twice, racing on _extension_errors).
+    if _sources is not None:
+        return _sources
+    with _sources_lock:
+        if _sources is not None:
+            return _sources
         srcs: list[MangaSource] = [cls() for cls in _BUILTIN]
         # Declarative user extensions (safe, multi-user) come after built-ins.
         _load_extensions(srcs)
@@ -97,14 +113,15 @@ def _all() -> list[MangaSource]:
         except Exception as exc:  # noqa: BLE001
             print(f"[sources] AI adapter unavailable: {exc}")
         _sources = srcs
-    return _sources
+        return _sources
 
 
 def reload() -> None:
     """Drop the cached source list so the next call rebuilds it — picks up newly
     installed/removed/toggled extensions WITHOUT a server restart."""
     global _sources
-    _sources = None
+    with _sources_lock:
+        _sources = None
 
 
 def find_source(url: str) -> MangaSource | None:
@@ -142,28 +159,149 @@ def find_by_name(name: str) -> MangaSource | None:
     return None
 
 
+_SEARCH_DEADLINE = 25   # seconds — overall cap for the whole web search
+
+# Non-alphanumeric chars ignored when comparing a title to the query, so
+# "My Dress-Up Darling" matches "my dress up darling".
+_NORM_RE = None  # lazily compiled in _norm (avoids an import-time re dependency here)
+
+
+def _norm(s: str) -> str:
+    """Lowercase and collapse to space-separated alphanumeric words, so hyphens,
+    punctuation and casing don't affect title matching."""
+    global _NORM_RE
+    if _NORM_RE is None:
+        import re
+        _NORM_RE = re.compile(r"[^a-z0-9]+")
+    return _NORM_RE.sub(" ", (s or "").lower()).strip()
+
+
+def _relevance(query: str, title: str, priority: int, rank: int,
+               match_score: float = -1.0) -> float:
+    """Score how well a hit answers `query`, used to sort combined web results
+    best-first across all sources. Higher is better.
+
+    If the source supplied `match_score` (0.0–1.0 — it ranked the hit against titles
+    the display `title` may not show, e.g. an English alt title on a romaji-titled
+    series), that decides the tier: it's the authoritative relevance and can't be
+    second-guessed by comparing our query to a romaji string we don't understand.
+    Otherwise we fall back to text tiers on the display title: exact == query, then
+    prefix, then all query words present, then partial word overlap.
+
+    `priority` (source weight) and `rank` (position in the source's own best-match
+    list) only fine-tune WITHIN a tier, so a genuinely better match from a
+    low-priority source still beats a weak match from a high-priority one."""
+    if match_score is not None and match_score >= 0.0:
+        # Map the source's 0–1 score onto the same tier scale as the text path so
+        # the two ranking paths are comparable: 1.0 → ~exact (1000), scaling down.
+        base = 1000.0 * match_score
+    else:
+        q, t = _norm(query), _norm(title)
+        if not q or not t:
+            base = 0.0
+        elif t == q:
+            base = 1000.0
+        elif t.startswith(q):
+            base = 800.0
+        else:
+            qw = q.split()
+            tw = set(t.split())
+            hit = sum(1 for w in qw if w in tw)
+            if hit == len(qw):
+                base = 600.0            # every query word present (any order)
+            else:
+                base = 300.0 * (hit / len(qw))   # partial overlap, scaled 0–300
+    # priority nudges within a tier (bounded so it can't jump tiers); a higher rank
+    # in the source's own list (rank 0 = its top hit) is a small further tie-break.
+    return base + max(-20, min(20, priority)) - rank * 0.1
+
+
 def search_all(query: str, limit: int = 20) -> list[dict[str, object]]:
-    """Search every source that supports title search (can_search), combine the
-    results, and return them as plain dicts for the API. Sources that don't search
-    (most of them) are skipped. A failing source is skipped, never fatal."""
+    """Search every source that supports title search (can_search) CONCURRENTLY,
+    combine the results, and return them as plain dicts for the API. Sources that
+    don't search are skipped; a failing/slow one is skipped, never fatal. The whole
+    fan-out is bounded by an overall deadline so one slow source can't stall the
+    request thread (which serializes with the DB lock)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     query = (query or "").strip()
     if not query:
         return []
-    out: list[dict[str, object]] = []
-    for s in _all():
-        if not getattr(s, "can_search", False):
-            continue
+    searchable = [s for s in _all() if getattr(s, "can_search", False)]
+    if not searchable:
+        return []
+
+    def _one(src):
+        # rank = this hit's position in the source's own best-match-first list, so
+        # we can reward a source's top results even after interleaving sources.
+        return [({
+            "source": r.source, "source_label": r.source_label,
+            "title": r.title, "url": r.url, "author": r.author,
+            "cover_url": r.cover_url, "description": r.description, "year": r.year,
+            "chapter_count": getattr(r, "chapter_count", -1),
+            # Kept out of the API payload (popped before return) — used only for
+            # ranking; a source's own alt-title-aware score beats display-title text.
+            "_match_score": getattr(r, "match_score", -1.0),
+        }, rank) for rank, r in enumerate(src.search(query, limit=limit))]
+
+    # Collect every source's hits, tagged with the source object (for its priority)
+    # and the hit's in-source rank, so the final ordering can be by relevance across
+    # sources rather than simply grouping one source after another.
+    scored: list[tuple[float, int, dict[str, object]]] = []
+    seen_urls: set[str] = set()
+    with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as ex:
+        futs = {ex.submit(_one, s): s for s in searchable}
         try:
-            for r in s.search(query, limit=limit):
-                out.append({
-                    "source": r.source, "source_label": r.source_label,
-                    "title": r.title, "url": r.url, "author": r.author,
-                    "cover_url": r.cover_url, "description": r.description,
-                    "year": r.year,
-                })
-        except Exception as exc:  # noqa: BLE001
-            print(f"[sources] search failed for {s.name!r}: {exc}")
+            for fut in as_completed(futs, timeout=_SEARCH_DEADLINE):
+                s = futs[fut]
+                try:
+                    hits = fut.result()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[sources] search failed for {s.name!r}: {exc}")
+                    continue
+                prio = getattr(s, "priority", 0)
+                for r, rank in hits:
+                    # Do NOT de-dupe across sources by title: different sources carry
+                    # genuinely DIFFERENT content for the "same" series — MangaDex may
+                    # have 1 readable English chapter where Weeb Central has 124.
+                    # Collapsing them would hide the source the user actually wants.
+                    # Only drop exact-URL duplicates (a source listing a series twice).
+                    u = str(r.get("url", ""))
+                    if u and u in seen_urls:
+                        continue
+                    if u:
+                        seen_urls.add(u)
+                    ms = float(r.pop("_match_score", -1.0))
+                    scored.append((_relevance(query, str(r.get("title", "")), prio, rank, ms), rank, r))
+        except TimeoutError:
+            print("[sources] web search hit the overall deadline; returning partial results")
+
+    # Interleave all sources by relevance: the closest title match to the query
+    # floats to the top no matter which source it came from, with source priority
+    # only breaking ties. Higher score first; stable within equal scores. Every hit
+    # keeps its per-card source badge so the user still sees (and picks) the source.
+    scored.sort(key=lambda t: t[0], reverse=True)
+    out: list[dict[str, object]] = [r for _score, _rank, r in scored]
+
+    # NOTE: we do NOT fetch chapter counts here — resolving them for every result
+    # is slow (MangaDex rate-limits the per-result feed calls, adding several
+    # seconds), and blocking the search on it makes the whole UI feel sluggish.
+    # Results carry whatever count their source supplied for free (>= 0); the rest
+    # stay -1 and the frontend fills them in LAZILY via /api/chapter-count so the
+    # grid appears instantly and each "· N ch" pops in as it resolves.
     return out
+
+
+def chapter_count_for(source: str, url: str) -> int:
+    """Readable chapter count for one result, resolved on demand (backs the lazy
+    /api/chapter-count endpoint). -1 if unknown/unsupported."""
+    src = find_by_name((source or "").strip())
+    if not src or not (url or "").strip():
+        return -1
+    try:
+        n = src.chapter_count(url)
+    except Exception:
+        return -1
+    return n if isinstance(n, int) else -1
 
 
 def any_searchable() -> bool:

@@ -61,15 +61,56 @@ function useJobChannel(fetchStatus, onComplete) {
 // list (fetched with no download). Click a chapter → it streams live into the
 // reader (proxied). "Import" hands off to the normal import flow. Nothing is
 // saved to disk unless the user imports.
+// Shown the instant a preview is requested, while the (potentially slow) chapter
+// feed is fetched from the source. A skeleton in the same shape as PreviewModal so
+// the swap to real content isn't jarring.
+function PreviewLoading({ onClose }) {
+  return (
+    <window.Modal onClose={onClose} panelClass="preview-modal preview-modal-loading" labelledBy="preview-loading-title">
+      <div className="preview-head">
+        <div className="preview-cover"><div className="preview-skel preview-skel-cover" /></div>
+        <div className="preview-info">
+          <div className="preview-badge">Fetching preview…</div>
+          <h2 id="preview-loading-title" className="preview-title">
+            <span className="preview-spinner" aria-hidden="true" /> Loading chapters…
+          </h2>
+          <div className="preview-skel preview-skel-line" style={{ width: "60%" }} />
+          <div className="preview-skel preview-skel-line" style={{ width: "90%" }} />
+          <div className="preview-skel preview-skel-line" style={{ width: "80%" }} />
+          <div className="preview-hint">Pulling the chapter list from the source — this can take a few seconds.</div>
+        </div>
+        <button className="icon-btn preview-close" onClick={onClose} title="Close"><window.IconClose size={16} /></button>
+      </div>
+      <div className="preview-chapters-head"><span>Chapters</span></div>
+      <div className="preview-chapters">
+        {[0, 1, 2, 3, 4].map((i) => <div key={i} className="preview-skel preview-skel-chapter" />)}
+      </div>
+    </window.Modal>
+  );
+}
+
 function PreviewModal({ data, onClose, onReadChapter, onImport }) {
   const [loadingCh, setLoadingCh] = useState(null);   // chapter index being fetched
-  const chapters = data.chapters || [];
+  const [coverErr, setCoverErr] = useState(false);
+  const [chFilter, setChFilter] = useState("");       // chapter-list filter (D2.4)
+  const chReqRef = useRef(0);                          // stale-guard for chapter loads
+  const allChapters = data.chapters || [];
+  // Filter the chapter list by number/title so a 400-chapter series is navigable.
+  const chapters = chFilter.trim()
+    ? allChapters.filter((ch) => {
+        const q = chFilter.trim().toLowerCase();
+        return String(ch.number || "").toLowerCase().includes(q)
+          || String(ch.title || "").toLowerCase().includes(q);
+      })
+    : allChapters;
 
   function readChapter(ch) {
     if (loadingCh != null) return;
+    const myReq = ++chReqRef.current;
     setLoadingCh(ch.index);
     window.ApiClient.previewPages(data.source, ch.id, ch.number, ch.title)
       .then((r) => {
+        if (myReq !== chReqRef.current) return;   // superseded by a newer click
         const pages = (r && r.pages) || [];
         if (!pages.length) { window.toast("This chapter has no readable pages.", "error"); return; }
         // Build a reader item with ONE chapter whose pages are the remote URLs.
@@ -89,8 +130,8 @@ function PreviewModal({ data, onClose, onReadChapter, onImport }) {
     <window.Modal onClose={onClose} panelClass="preview-modal" labelledBy="preview-title">
       <div className="preview-head">
         <div className="preview-cover">
-          {data.cover_url
-            ? <img src={data.cover_url} alt="" referrerPolicy="no-referrer" />
+          {data.cover_url && !coverErr
+            ? <img src={data.cover_url} alt="" referrerPolicy="no-referrer" onError={() => setCoverErr(true)} />
             : <div className="preview-noart">本</div>}
         </div>
         <div className="preview-info">
@@ -114,9 +155,16 @@ function PreviewModal({ data, onClose, onReadChapter, onImport }) {
         <button className="icon-btn preview-close" onClick={onClose} title="Close"><window.IconClose size={16} /></button>
       </div>
 
-      <div className="preview-chapters-head">Chapters — click to read</div>
+      <div className="preview-chapters-head">
+        <span>Chapters — click to read</span>
+        {allChapters.length > 12 && (
+          <input className="preview-ch-filter" placeholder="Filter #/title…"
+            value={chFilter} onChange={(e) => setChFilter(e.target.value)} />
+        )}
+      </div>
       <div className="preview-chapters">
-        {chapters.length === 0 && <div className="preview-empty">No chapters found.</div>}
+        {allChapters.length === 0 && <div className="preview-empty">No chapters found.</div>}
+        {allChapters.length > 0 && chapters.length === 0 && <div className="preview-empty">No chapters match “{chFilter}”.</div>}
         {chapters.map((ch) => (
           <button key={ch.index} className="preview-chapter" disabled={loadingCh != null}
             onClick={() => readChapter(ch)}>
@@ -151,15 +199,30 @@ function App() {
   const [addLinkOpen, setAddLinkOpen] = useState(false);
   const [addLinkUrl, setAddLinkUrl] = useState("");   // prefill when opened from a pasted link
   const [preview, setPreview] = useState(null);       // {source,title,chapters,...} for read-before-import
+  const [previewLoading, setPreviewLoading] = useState(false);  // fetch in flight (slow — MangaDex feed)
 
   // Open a read-before-import preview for a source URL: fetch its chapter list
-  // (no download) and show the preview modal. Errors surface as a toast.
+  // (no download) and show the preview modal. The fetch can be slow (it pulls the
+  // whole chapter feed from the source), so we show a loading modal IMMEDIATELY on
+  // click for instant feedback. Errors surface as a toast. A request id guards
+  // against a slower earlier preview clobbering a newer one.
+  const previewReqRef = useRef(0);
   function openPreview(url) {
-    setSearchOpen(false);
+    // Keep the search panel MOUNTED underneath the preview (don't setSearchOpen(false))
+    // so its web-search results survive — closing the preview drops you back onto the
+    // same results instead of the library, giving a natural "back to search".
+    const myReq = ++previewReqRef.current;
+    setPreview(null);
+    setPreviewLoading(true);
     window.ApiClient.previewSeries(url)
-      .then((d) => setPreview(d))
-      .catch((e) => window.toast(`Couldn't preview: ${e.message || e}`, "error"));
+      .then((d) => { if (myReq === previewReqRef.current) { setPreview(d); setPreviewLoading(false); } })
+      .catch((e) => {
+        if (myReq !== previewReqRef.current) return;
+        setPreviewLoading(false);
+        window.toast(`Couldn't preview: ${e.message || e}`, "error");
+      });
   }
+  function closePreview() { previewReqRef.current++; setPreview(null); setPreviewLoading(false); }
   // Open the import dialog, optionally pre-filled with a pasted URL. Closes the
   // search overlay if it was open (so pasting a link in search jumps to import).
   function openAddLink(url) {
@@ -251,15 +314,34 @@ function App() {
   // Poll the active background job's status (import/re-sync via scrapeStatus,
   // move via moveStatus) at the app level, so the modal can close and you keep
   // browsing while it runs. On completion, refresh the library.
-  // Re-adopt jobs already running server-side (e.g. after a page refresh mid-job)
-  // so their indicators reappear. Both channels are checked independently.
-  const jobResumedRef = useRef(false);
+  // Adopt jobs running SERVER-SIDE so their indicator shows on THIS device — no
+  // matter when the import started (another device, before this tab opened) or how
+  // many times the page was refreshed. Imports run on the server, independent of any
+  // browser tab; this keeps a *continuous* low-frequency watch (every 4s while the
+  // channel is idle) so the indicator reappears after a refresh/close/reopen and
+  // cross-device (start on phone → see it on PC). The channel's own 1s poll takes
+  // over once adopted; this watcher only fires when nothing is currently shown.
   useEffect(() => {
-    if (!loaded || jobResumedRef.current) return;
-    jobResumedRef.current = true;
-    window.ApiClient.scrapeStatus().then((s) => { if (s && s.running) importCh.start("import", s.title); }).catch(() => {});
-    window.ApiClient.moveStatus().then((s) => { if (s && s.running) moveCh.start("move", s.title); }).catch(() => {});
-  }, [loaded]);
+    if (!loaded) return;
+    let alive = true;
+    const tick = () => {
+      // Only look for a job to adopt when the indicator isn't already showing one
+      // (avoids fighting the channel's own poll).
+      if (!importCh.active) {
+        window.ApiClient.scrapeStatus()
+          .then((s) => { if (alive && s && s.running) importCh.start(s.kind || "import", s.title); })
+          .catch(() => {});
+      }
+      if (!moveCh.active) {
+        window.ApiClient.moveStatus()
+          .then((s) => { if (alive && s && s.running) moveCh.start("move", s.title); })
+          .catch(() => {});
+      }
+    };
+    tick();                                  // immediately on load
+    const id = setInterval(tick, 4000);      // then keep watching
+    return () => { alive = false; clearInterval(id); };
+  }, [loaded, importCh.active, moveCh.active]);
 
   // Decide whether to show the login gate, then init. If the server says a
   // password is required AND we don't already hold a working token, gate. If we
@@ -427,6 +509,7 @@ function App() {
             <window.Detail
               item={detail}
               libraries={libraries}
+              refreshSignal={tick}
               onBack={goBackToLibrary}
               onMoveStarted={(title) => { goBackToLibrary(); moveCh.start("move", title); }}
               onOpenReader={(item, page, endPage, resumePage) => setReader({ item, startPage: page, endPage, resumePage })}
@@ -455,13 +538,14 @@ function App() {
           onClose={() => { setReader(null); if (!reader.previewSource) setTimeout(reload, 350); }}
         />
       )}
+      {previewLoading && !preview && <PreviewLoading onClose={closePreview} />}
       {preview && (
         <PreviewModal
           data={preview}
-          onClose={() => setPreview(null)}
+          onClose={closePreview}
           onReadChapter={(item, startPage, endPage) =>
             setReader({ item, startPage, endPage, previewSource: preview.source })}
-          onImport={(url) => { setPreview(null); openAddLink(url); }}
+          onImport={(url) => { closePreview(); openAddLink(url); }}
         />
       )}
       {rescanOpen && (

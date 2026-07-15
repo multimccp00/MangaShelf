@@ -336,8 +336,11 @@ class DeclarativeSource(MangaSource):
         title = str(_jpath(root, self._series["title"]) or "Untitled")
         author = str(_jpath(root, self._series["author"]) or "") if "author" in self._series else ""
         cover = _interp(self._series["cover"], ctx, root) if "cover" in self._series else ""
-        # Chapter list: a second endpoint yields parallel id/number lists.
-        feed = _fetch_json(_interp(self._series["chapters_endpoint"], ctx, None))
+        # Chapter list: a second endpoint yields parallel id/number lists. The series
+        # JSON (root) is passed in too, so the chapters endpoint can reference a field
+        # from it — e.g. a site whose chapter feed is keyed by an internal id that
+        # differs from the URL slug can use "…/{$.comic.hid}/chapters".
+        feed = _fetch_json(_interp(self._series["chapters_endpoint"], ctx, root))
         ids = _jpath(feed, self._series["chapter_id"])
         nums = _jpath(feed, self._series["chapter_number"]) if "chapter_number" in self._series else []
         ids = ids if isinstance(ids, list) else [ids]

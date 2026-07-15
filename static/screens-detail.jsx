@@ -222,7 +222,7 @@ function MoveModal({ item, libraries, onClose, onStarted }) {
   );
 }
 
-function Detail({ item: initialItem, libraries = [], onBack, onMoveStarted, onOpenReader }) {
+function Detail({ item: initialItem, libraries = [], refreshSignal, onBack, onMoveStarted, onOpenReader }) {
   // Load the full series record (with real chapters) on mount.
   const [item, setItem] = useStateDtl(initialItem);
   const [moveOpen, setMoveOpen] = useStateDtl(false);
@@ -385,6 +385,10 @@ function Detail({ item: initialItem, libraries = [], onBack, onMoveStarted, onOp
     return true;
   }
 
+  // Re-fetch the authoritative series record on mount AND whenever refreshSignal
+  // changes — the parent bumps it after the reader closes, so returning to a
+  // still-mounted Detail picks up the new read-progress (chapter read/in-progress
+  // marks and the % bar) live, instead of staying stale until you leave and reopen.
   useEffectDtl(() => {
     let alive = true;
     window.ApiClient.getSeries(initialItem.id)
@@ -397,7 +401,7 @@ function Detail({ item: initialItem, libraries = [], onBack, onMoveStarted, onOp
       })
       .catch(() => setLoading(false));
     return () => { alive = false; };
-  }, [initialItem.id]);
+  }, [initialItem.id, refreshSignal]);
 
   const stColor = window.STATUS_COLOR[status];
   const chapters = item.chapters || [];
