@@ -88,11 +88,31 @@ def main() -> None:
     # app isn't reachable by other devices unless you opt in.
     host = os.environ.get("MANGASHELF_HOST", "127.0.0.1")
     port = int(os.environ.get("MANGASHELF_PORT", "8000"))
+    # Auto-reload for development: set MANGASHELF_RELOAD=1 to have the server watch
+    # the source files and restart itself on any change — so backend edits take
+    # effect WITHOUT a manual restart. Off by default (the normal remote run stays
+    # on the reliable custom-shutdown path below).
+    reload = os.environ.get("MANGASHELF_RELOAD", "").strip().lower() in ("1", "true", "yes", "on")
     if host not in ("127.0.0.1", "localhost"):
         print(f"MangaShelf web — http://localhost:{port}  (LAN: http://<your-pc-ip>:{port})")
     else:
         print(f"MangaShelf web — http://localhost:{port}  (localhost only; set MANGASHELF_HOST=0.0.0.0 for LAN)")
+    if reload:
+        print("Auto-reload ON — the server restarts when you edit source files.")
     print("Press Ctrl+C to stop the server.")
+
+    if reload:
+        # Reload mode needs the app as an import STRING (uvicorn spawns a reloader
+        # process that re-imports it on change). Watch this dir + the project root
+        # so both the web code and the core library modules trigger a reload.
+        this_dir = str(Path(__file__).resolve().parent)
+        root_dir = str(Path(__file__).resolve().parent.parent)
+        uvicorn.run(
+            "api:app", host=host, port=port, reload=True,
+            reload_dirs=[this_dir, root_dir],
+            timeout_graceful_shutdown=2,
+        )
+        return
 
     # Configure the server explicitly so shutdown is RELIABLE. With the previous
     # uvicorn.run(app, ...) call, pressing Ctrl+C often didn't actually stop the

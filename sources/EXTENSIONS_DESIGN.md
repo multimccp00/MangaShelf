@@ -226,4 +226,20 @@ Tiers 1–3 deliver the feature you asked for. 4–5 are force-multipliers.
 }
 ```
 This is deliberately near-identical to `_ai_cache/<domain>.json` so the AI export in §7 is a thin wrapper.
+
+### Optional `search` block (added 2026-07-15)
+An extension can also make its site **title-searchable** (joining the "search the
+web" feature) by adding a `search` block. Scrapes the site's search-results page:
+```json
+"search": {
+  "url": "https://examplescans.org/search?q={query}",
+  "result_regex": "<a class=\"series\" href=\"(/manga/[^\"]+)\">([^<]+)</a>",
+  "cover_regex": "<img[^>]+src=\"([^\"]+)\""
+}
+```
+- `url` — the search-results URL; `{query}` is replaced with the URL-encoded query (required).
+- `result_regex` — matches each result's series-page href in group 1, optional title in group 2.
+- `cover_regex` / `title_regex` — optional, applied per matched result chunk.
+Any extension with this block sets `can_search=True` and its hits appear alongside
+MangaDex in `/api/search-web`. No code changes — the search fan-out picks it up.
 ```

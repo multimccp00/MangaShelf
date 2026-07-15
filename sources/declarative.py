@@ -108,6 +108,24 @@ def validate_manifest(m: dict) -> dict:
         for ep in (series["endpoint"], series["chapters_endpoint"], pages["endpoint"]):
             if not ep.startswith(("http://", "https://")):
                 raise ManifestError(f"json endpoint must be an absolute URL: {ep!r}")
+
+    # Optional "search" block — lets this source be searched by title (joins the
+    # web-search feature). Scrapes the site's search-results page with regex.
+    if "search" in m:
+        sb = m["search"]
+        if not isinstance(sb, dict):
+            raise ManifestError("search must be an object")
+        # {query} is replaced with the URL-encoded query.
+        url_tmpl = _need(sb, "url", str, "search")
+        if "{query}" not in url_tmpl:
+            raise ManifestError("search.url must contain the {query} placeholder")
+        if not url_tmpl.startswith(("http://", "https://")):
+            raise ManifestError("search.url must be an absolute URL")
+        # A regex that finds each result's series-page link (+ optional title).
+        _compile(_need(sb, "result_regex", str, "search"), "search.result_regex")
+        for opt in ("title_regex", "cover_regex"):
+            if opt in sb:
+                _compile(sb[opt], f"search.{opt}")
     return m
 
 
@@ -202,6 +220,64 @@ class DeclarativeSource(MangaSource):
         self._type = self.m["type"]
         self._needs_browser = bool(self.m.get("needs_browser", False))
         self._referer_mode = (self.m.get("headers", {}) or {}).get("referer", "")
+        self._search = self.m.get("search")
+        self.can_search = self._search is not None
+
+    # --- title search (optional; only if the manifest has a "search" block) ---
+    def search(self, query: str, limit: int = 20):
+        from .base import SearchResult
+        sb = self._search
+        if not sb or not (query or "").strip():
+            return []
+        import urllib.parse as _up
+        url = sb["url"].replace("{query}", _up.quote(query.strip()))
+        try:
+            if self._needs_browser:
+                html = _render(url).get("html", "") or self._render_html(url)
+            else:
+                html = _fetch_html(url)
+        except Exception:
+            return []
+        result_rx = re.compile(sb["result_regex"], re.I | re.S)
+        title_rx = re.compile(sb["title_regex"], re.I | re.S) if sb.get("title_regex") else None
+        cover_rx = re.compile(sb["cover_regex"], re.I | re.S) if sb.get("cover_regex") else None
+        out = []
+        seen = set()
+        for mm in _findall_budgeted(result_rx, html):
+            href = mm.group(1) if mm.groups() else mm.group(0)
+            full = urljoin(url, href.strip())
+            if full in seen:
+                continue
+            seen.add(full)
+            # Title: from a capture group 2 on the result regex, else a nearby title
+            # regex applied to the matched chunk, else the URL slug.
+            title = ""
+            if mm.groups() and len(mm.groups()) >= 2 and mm.group(2):
+                title = re.sub(r"<[^>]+>", "", mm.group(2)).strip()
+            elif title_rx:
+                tm = title_rx.search(mm.group(0))
+                if tm and tm.groups():
+                    title = re.sub(r"<[^>]+>", "", tm.group(1)).strip()
+            if not title:
+                title = (urlparse(full).path.rstrip("/").split("/")[-1] or full).replace("-", " ").title()
+            cover = ""
+            if cover_rx:
+                cm = cover_rx.search(mm.group(0))
+                if cm and cm.groups():
+                    cover = urljoin(url, cm.group(1).strip())
+            out.append(SearchResult(
+                source=self.name, source_label=self.label, title=title,
+                url=full, cover_url=cover,
+            ))
+            if len(out) >= limit:
+                break
+        return out
+
+    def _render_html(self, url: str) -> str:
+        # Fallback: some rendered pages return links but not raw html; join a minimal
+        # HTML from the rendered link list so the search regex still has something.
+        r = _render(url)
+        return "\n".join(f'<a href="{h}">{t}</a>' for h, t in r.get("links", []))
 
     # --- routing ---
     def matches(self, url: str) -> bool:
