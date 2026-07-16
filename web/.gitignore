@@ -1,0 +1,26 @@
+node_modules/
+
+# Python bytecode (compiled on import) — never commit.
+__pycache__/
+*.py[cod]
+
+# Chromium/Playwright user-data profiles left by headless testing — these hold
+# cookies, login data, and history. Never commit.
+_cdp*/
+.playwright/
+playwright-report/
+
+# App runtime data (should never be in the repo anyway, but guard it).
+*.db
+*.db-journal
+*.db-wal
+*.log
+
+# User-provided source adapters are private: keep the package importable
+# (__init__.py) but never commit anything else in here (adapters, notes, caches).
+sources/local/*
+!sources/local/__init__.py
+
+# Per-domain rules the AI adapter learns at runtime — machine-specific,
+# and they'd name scraping targets. Regenerated on first paste.
+sources/_ai_cache/
