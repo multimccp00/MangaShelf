@@ -268,15 +268,24 @@ def scan_and_sync(database: object, global_lists: "GlobalLists | None" = None,
             series_list = []
         result[lib_id] = series_list
         for series in series_list:
-            from sidecar import read_sidecar
-            sc = read_sidecar(series.folder_path)
-            title = sc.get("title", series.title) if sc else series.title
-            sid = database.upsert_series(lib_id, series.folder_path, title)
-            if sc:
-                database.sync_series_from_sidecar(sid, sc)
-                if global_lists is not None:
-                    global_lists.add_genres(sc.get("genres", []))
-                    global_lists.add_tags(sc.get("tags", []))
+            # Per-series isolation: the user can delete a series/library (or a
+            # sidecar can be malformed) WHILE this scan runs. One bad series must
+            # skip, not abort the whole scan mid-transaction — an aborted scan
+            # previously surfaced as an opaque "FOREIGN KEY constraint failed"
+            # with every remaining library left unscanned.
+            try:
+                from sidecar import read_sidecar
+                sc = read_sidecar(series.folder_path)
+                title = sc.get("title", series.title) if sc else series.title
+                sid = database.upsert_series(lib_id, series.folder_path, title)
+                if sc:
+                    database.sync_series_from_sidecar(sid, sc)
+                    if global_lists is not None:
+                        global_lists.add_genres(sc.get("genres", []))
+                        global_lists.add_tags(sc.get("tags", []))
+            except Exception as exc:  # noqa: BLE001
+                print(f"[scan] skipped {series.folder_path!r}: {exc}")
+                continue
         # Drop rows for folders that still exist but are no longer valid series
         # (e.g. the library root once its content moved into sub-series). Only do
         # this when the library root is reachable AND the scan returned something,
@@ -287,7 +296,10 @@ def scan_and_sync(database: object, global_lists: "GlobalLists | None" = None,
             root_ok = False
         if root_ok and series_list and hasattr(database, "prune_stale_series"):
             valid = {s.folder_path for s in series_list}
-            database.prune_stale_series(lib_id, valid)
+            try:
+                database.prune_stale_series(lib_id, valid)
+            except Exception as exc:  # noqa: BLE001 — same isolation as above
+                print(f"[scan] prune skipped for library {lib_id}: {exc}")
     # Remove (soft-delete) any series whose folder no longer exists. Drive-aware,
     # so it's safe even for a single-library rescan.
     database.purge_missing_series()
