@@ -248,17 +248,33 @@ function useSeriesActions(item, { onDeleted } = {}) {
 
   async function deleteCard(e) {
     if (e) e.stopPropagation();
-    const ok = await window.confirmDialog({
+    const res = await window.confirmDialog({
       title: `Remove “${item.title}”?`,
-      message: "This only removes it from the database — the files on disk are untouched.",
+      message: "Removes it from the library.",
       confirmLabel: "Remove",
       tone: "danger",
+      checkboxes: [
+        {
+          id: "disk",
+          label: "Also move the folder to the recycle bin",
+          hint: "Recoverable from the bin; leave unchecked to keep the files.",
+          // The default follows the "deleting also deletes files" setting, but
+          // the box is always visible so every delete is an explicit choice.
+          checked: !!window.Settings.deleteFromDisk,
+        },
+        { id: "remember", label: "Remember this choice as my default", checked: false },
+      ],
     });
-    if (!ok) return;
-    window.ApiClient.deleteSeries(item.id)
-      .then(() => {
+    if (!res || !res.ok) return;
+    const disk = !!res.checks.disk;
+    if (res.checks.remember && disk !== !!window.Settings.deleteFromDisk) {
+      window.Settings.set({ deleteFromDisk: disk });
+    }
+    window.ApiClient.deleteSeries(item.id, disk)
+      .then((r) => {
         window.STORE.items = (window.STORE.items || []).filter((x) => x.id !== item.id);
         onDeleted?.(item.id);
+        if (disk) window.toast(r.disk === "recycled" ? "Folder moved to the recycle bin." : "Removed (folder was already gone).", "ok");
       })
       .catch((err) => window.toast(`Delete failed: ${err.message || err}`, "error"));
   }
@@ -808,23 +824,33 @@ function Modal({ onClose, panelClass, labelledBy, children, dismissable = true }
 //   });
 //
 // Resolves true on confirm, false on cancel / Escape / backdrop click.
+// With `opts.checkboxes` ([{id, label, hint?, checked?}]) it renders opt-in
+// checkboxes and resolves an OBJECT instead: { ok, checks: {id: bool} } — so
+// destructive extras (e.g. "also delete files") are explicit per action.
 function ConfirmDialog({ opts, onResolve }) {
   const confirmRef = useRef(null);
+  const [checks, setChecks] = useState(() => {
+    const init = {};
+    (opts.checkboxes || []).forEach((c) => { init[c.id] = !!c.checked; });
+    return init;
+  });
+  const hasChecks = (opts.checkboxes || []).length > 0;
+  const resolve = (ok) => onResolve(hasChecks ? { ok, checks } : ok);
 
   useEffect(() => {
     // Focus the confirm button so Enter confirms and the dialog is keyboard-first.
     if (confirmRef.current) confirmRef.current.focus();
     function onKey(e) {
-      if (e.key === "Escape") { e.preventDefault(); onResolve(false); }
-      else if (e.key === "Enter") { e.preventDefault(); onResolve(true); }
+      if (e.key === "Escape") { e.preventDefault(); resolve(false); }
+      else if (e.key === "Enter") { e.preventDefault(); resolve(true); }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, []);
+  }, [checks]);
 
   const tone = opts.tone || "default";
   return (
-    <div className="confirm-overlay" onClick={() => onResolve(false)}>
+    <div className="confirm-overlay" onClick={() => resolve(false)}>
       <div className="confirm-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
         {opts.title && (
           <div className={"confirm-title tone-" + tone}>
@@ -834,14 +860,27 @@ function ConfirmDialog({ opts, onResolve }) {
           </div>
         )}
         {opts.message && <div className="confirm-message">{opts.message}</div>}
+        {(opts.checkboxes || []).map((c) => (
+          <label key={c.id} className="confirm-check">
+            <input
+              type="checkbox"
+              checked={!!checks[c.id]}
+              onChange={(e) => setChecks((prev) => ({ ...prev, [c.id]: e.target.checked }))}
+            />
+            <span>
+              {c.label}
+              {c.hint && <span className="confirm-check-hint">{c.hint}</span>}
+            </span>
+          </label>
+        ))}
         <div className="confirm-actions">
-          <button className="confirm-btn ghost" onClick={() => onResolve(false)}>
+          <button className="confirm-btn ghost" onClick={() => resolve(false)}>
             {opts.cancelLabel || "Cancel"}
           </button>
           <button
             ref={confirmRef}
             className={"confirm-btn primary tone-" + tone}
-            onClick={() => onResolve(true)}
+            onClick={() => resolve(true)}
           >
             {opts.confirmLabel || "Confirm"}
           </button>

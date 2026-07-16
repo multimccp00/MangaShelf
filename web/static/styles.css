@@ -2184,6 +2184,15 @@ textarea {
 /* Library remove (trash) — red on hover so it reads as the destructive action. */
 .settings-lib-remove:hover { color: #e74c3c; border-color: rgba(231, 76, 60, 0.6); }
 
+/* Opt-in checkboxes inside the confirm dialog (e.g. "also recycle files"). */
+.confirm-check {
+  display: flex; align-items: flex-start; gap: 9px;
+  margin: 10px 0 0; font-size: 13px; color: var(--text);
+  cursor: pointer; user-select: none;
+}
+.confirm-check input { margin-top: 2px; accent-color: var(--vermillion); }
+.confirm-check-hint { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
 /* "New chapters" tag on a Continue Reading card — set when a re-sync downloaded
    chapters past a caught-up read position; cleared once reading resumes. */
 .rail-card-new {

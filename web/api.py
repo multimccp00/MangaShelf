@@ -737,6 +737,7 @@ _SETTINGS_DEFAULTS: dict[str, Any] = {
     "confirmPrivate": True,
     "showSwitcher": True,
     "hidePrivate": False,        # hide private libraries from the UI (not delete)
+    "deleteFromDisk": False,     # pre-check "also delete files" in the delete dialog
     "lastLibraryId": None,
 }
 
@@ -1254,13 +1255,37 @@ def update_metadata(series_id: int, body: MetadataIn) -> dict[str, Any]:
 
 
 @app.delete("/api/series/{series_id}", dependencies=[Depends(require_token)])
-def delete_series(series_id: int) -> dict[str, Any]:
-    """Remove a series from the DB (does not delete files from disk)."""
+def delete_series(series_id: int, disk: bool = False) -> dict[str, Any]:
+    """Remove a series from the DB. With ?disk=true, ALSO sends its folder to the
+    recycle bin (never a hard rm — recoverable from the bin). The folder must
+    resolve inside a configured library root — same sandbox rule as /api/page —
+    so a corrupted/stale folder_path can never delete something outside a library."""
     data = _db.get_series_by_id(series_id)
     if not data:
         raise HTTPException(status_code=404, detail="Series not found")
+    disk_result = "kept"
+    if disk:
+        folder = Path(str(data.get("folder_path") or ""))
+        try:
+            resolved = folder.resolve()
+        except OSError:
+            resolved = folder
+        if not _is_inside_library(resolved):
+            raise HTTPException(status_code=400, detail="Series folder is outside every library root; refusing to delete it.")
+        if resolved.is_dir():
+            try:
+                import send2trash
+                send2trash.send2trash(str(resolved))
+                disk_result = "recycled"
+            except Exception as exc:  # noqa: BLE001 — DB row survives if disk fails
+                raise HTTPException(status_code=500, detail=f"Couldn't move the folder to the recycle bin: {exc}")
+        else:
+            disk_result = "already-gone"
     _db.delete_series(series_id)
-    return {"ok": True, "deleted": series_id}
+    with _CACHE_LOCK:
+        _COVER_PATH_CACHE.pop(str(series_id), None)
+    _invalidate_chapters_cache(str(data.get("folder_path") or "") or None)
+    return {"ok": True, "deleted": series_id, "disk": disk_result}
 
 
 class SplitChapterIn(BaseModel):

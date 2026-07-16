@@ -1052,6 +1052,8 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
   function setConfirm(v) { setConfirmPrivate(v); window.Settings.set({ confirmPrivate: v }); }
   function setSwitcher(v) { setShowSwitcher(v); window.Settings.set({ showSwitcher: v }); onShowSwitcher(v); }
   function setHidePriv(v) { window.Settings.set({ hidePrivate: v }); onHidePrivate?.(v); }
+  const [delDisk, setDelDiskState] = useState(!!window.Settings.deleteFromDisk);
+  function setDelDisk(v) { setDelDiskState(v); window.Settings.set({ deleteFromDisk: v }); }
 
   async function savePassword(clear) {
     setPwMsg("");
@@ -1210,6 +1212,13 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
                 <div className="settings-toggle-hint">Private libraries vanish from the switcher and this list until turned back off — nothing is deleted. Handy before handing the screen to someone.</div>
               </div>
               <Toggle checked={!!hidePrivateProp} onChange={setHidePriv} />
+            </div>
+            <div className="settings-toggle-row">
+              <div className="settings-toggle-label">
+                <div>Deleting a series also recycles its files</div>
+                <div className="settings-toggle-hint">Pre-checks "move the folder to the recycle bin" in the delete dialog. The checkbox stays visible on every delete, so you can always override per series.</div>
+              </div>
+              <Toggle checked={delDisk} onChange={setDelDisk} />
             </div>
           </div>
 

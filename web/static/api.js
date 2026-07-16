@@ -254,6 +254,7 @@ const Settings = {
   confirmPrivate: loadSettings().confirmPrivate !== false,  // default on
   showSwitcher: loadSettings().showSwitcher !== false,      // default on
   hidePrivate: loadSettings().hidePrivate === true,         // default off
+  deleteFromDisk: loadSettings().deleteFromDisk === true,   // default off
   lastLibraryId: loadSettings().lastLibraryId ?? null,
 
   _snapshot() {
@@ -262,6 +263,7 @@ const Settings = {
       confirmPrivate: this.confirmPrivate,
       showSwitcher: this.showSwitcher,
       hidePrivate: this.hidePrivate,
+      deleteFromDisk: this.deleteFromDisk,
       lastLibraryId: this.lastLibraryId,
     };
   },
@@ -286,6 +288,7 @@ const Settings = {
         if (s.confirmPrivate != null) this.confirmPrivate = !!s.confirmPrivate;
         if (s.showSwitcher != null) this.showSwitcher = !!s.showSwitcher;
         if (s.hidePrivate != null) this.hidePrivate = !!s.hidePrivate;
+        if (s.deleteFromDisk != null) this.deleteFromDisk = !!s.deleteFromDisk;
         if (s.lastLibraryId !== undefined) this.lastLibraryId = s.lastLibraryId;
         saveSettings(this._snapshot());       // refresh the local cache
       }
@@ -523,8 +526,10 @@ const ApiClient = {
   renameChapter(id, oldName, number, title) {
     return postJSON(`${API}/series/${id}/rename_chapter`, { old_name: oldName, number, title });
   },
-  deleteSeries(id) {
-    return fetch(`${API}/series/${id}`, { method: "DELETE", headers: authHeaders() }).then(async (r) => {
+  // disk=true also sends the series folder to the RECYCLE BIN (server-validated
+  // to live inside a library root; never a hard delete).
+  deleteSeries(id, disk = false) {
+    return fetch(`${API}/series/${id}${disk ? "?disk=true" : ""}`, { method: "DELETE", headers: authHeaders() }).then(async (r) => {
       if (!r.ok) {
         let detail = `${r.status}`;
         try { const j = await r.json(); if (j && j.detail) detail = j.detail; } catch (e) {}
