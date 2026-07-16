@@ -1,6 +1,39 @@
 /* global window, React */
 const { useState: useStateRdr, useEffect: useEffectRdr, useRef: useRefRdr, useMemo: useMemoRdr } = React;
 
+// One page image. Top-level (NOT defined inside Reader): an inline component
+// function would be a new type every render, making React REMOUNT the <img> on
+// every state change — which re-decodes the image AND breaks native dblclick
+// (the browser won't synthesize it when the node under the cursor was replaced
+// between the two clicks).
+function PageImg({ p, flat, mode, previewSource }) {
+  const f = flat[p - 1];
+  if (!f) return null;
+  const imgStyle = mode === "vertical"
+    ? { background: "#1a1a22" }
+    : {
+        background: "#1a1a22",
+        width: "100%",
+        height: "100%",
+        objectFit: "contain",
+        display: "block",
+      };
+  return (
+    <img
+      data-page={p}
+      className="page-img"
+      src={previewSource ? window.ApiClient.previewPageUrl(f.abs, previewSource) : window.pageUrl(f.abs)}
+      alt={`Page ${p}`}
+      // Vertical/webtoon mode has hundreds of pages — lazy-load those. But in
+      // single/double mode only 1–2 are shown, and lazy loading DELAYS the very
+      // image we're turning to, causing the harsh flash. Load those eagerly.
+      loading={mode === "vertical" ? "lazy" : "eager"}
+      decoding="async"
+      style={imgStyle}
+    />
+  );
+}
+
 // ====== Reader ======
 // `item` carries real chapters (loaded by Detail). Pages are flattened across
 // chapters into one continuous list so the slider/progress maps to a global page
@@ -168,8 +201,8 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
   useEffectRdr(() => {
     function onKey(e) {
       if (e.key === "Escape") { e.preventDefault(); handleClose(); }
-      else if (e.key === "ArrowRight" || e.key === " ") { e.preventDefault(); goToPage(page + 1); }
-      else if (e.key === "ArrowLeft") { goToPage(page - 1); }
+      else if (e.key === "ArrowRight" || e.key === " ") { e.preventDefault(); turnPage(1); }
+      else if (e.key === "ArrowLeft") { turnPage(-1); }
       else if (e.key === "1") changeMode("single");
       else if (e.key === "2") changeMode("vertical");
       else if (e.key === "3") changeMode("double");
@@ -287,6 +320,14 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
     }
   }
 
+  // Turn one "spread" in the reading direction. Double-page mode shows two pages
+  // at once ([page, page+1]), so advancing by a single page would re-show a page
+  // we just read; step by 2 there so each turn reveals the NEXT pair. dir = +1
+  // forward / -1 back. Single/vertical step by 1.
+  function turnPage(dir) {
+    goToPage(page + dir * (mode === "double" ? 2 : 1));
+  }
+
   // Preload upcoming (and previous) pages so a page turn shows an already-decoded
   // image instead of flashing while it loads. In double mode we look two pages
   // ahead so the NEXT pair is ready, not just the next single page. Vertical mode
@@ -312,18 +353,166 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
     return () => { imgs.forEach((img) => { img.src = ""; }); };
   }, [page, mode, total, flat]);
 
-  // --- Swipe-to-turn (single/double page mode) ---
-  // Horizontal swipe on the page area changes pages, like a touch e-reader.
-  // A barely-moved gesture is treated as a tap (toggles chrome) instead.
+  // --- Pinch-zoom + swipe-to-turn (single/double page mode) ---
+  // One finger: horizontal swipe turns the page (like a touch e-reader), a
+  // barely-moved gesture is a tap (toggles chrome), and when zoomed it pans.
+  // Two fingers: pinch to zoom around the gesture midpoint. Double-tap toggles
+  // between fit (1×) and 2.5×. Vertical mode scrolls/zooms natively, untouched.
+  const MAX_ZOOM = 4;
+  // Live transform of the page content: scale + translation (px). Kept in a ref
+  // for per-move gesture math and mirrored to state so the view re-renders.
+  const [zoom, setZoom] = useStateRdr({ scale: 1, tx: 0, ty: 0 });
+  const zoomRef = useRefRdr(zoom);
+  zoomRef.current = zoom;
+  const isZoomed = zoom.scale > 1.01;
+
   const touchRef = useRefRdr(null);
   const touchHandledRef = useRefRdr(0);   // timestamp; suppresses the click that follows a touch
-  function onTouchStart(e) {
-    if (mode === "vertical") return;            // vertical mode scrolls naturally
-    const t = e.touches[0];
-    touchRef.current = { x: t.clientX, y: t.clientY };
+  const pinchRef = useRefRdr(null);       // active 2-finger gesture state
+
+  // Reset zoom whenever the page or reading mode changes — otherwise a zoomed-in
+  // view would carry over to the next (differently sized) page.
+  useEffectRdr(() => { setZoom({ scale: 1, tx: 0, ty: 0 }); }, [page, mode]);
+
+  function _dist(a, b) { return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY); }
+
+  // Clamp the pan so the zoomed image can't be dragged entirely off-screen.
+  function _clampPan(scale, tx, ty) {
+    const el = canvasRef.current;
+    const w = el ? el.clientWidth : window.innerWidth;
+    const h = el ? el.clientHeight : window.innerHeight;
+    const maxX = (w * (scale - 1)) / 2;
+    const maxY = (h * (scale - 1)) / 2;
+    return {
+      tx: Math.max(-maxX, Math.min(maxX, tx)),
+      ty: Math.max(-maxY, Math.min(maxY, ty)),
+    };
   }
+
+  function onTouchStart(e) {
+    if (mode === "vertical") return;            // vertical mode zooms/scrolls natively
+    if (e.touches.length === 2) {
+      // Begin a pinch: remember the starting finger spread and the transform then.
+      const [a, b] = e.touches;
+      pinchRef.current = {
+        startDist: _dist(a, b),
+        startScale: zoomRef.current.scale,
+        startTx: zoomRef.current.tx,
+        startTy: zoomRef.current.ty,
+      };
+      touchRef.current = null;                  // cancel any single-finger swipe
+      return;
+    }
+    const t = e.touches[0];
+    touchRef.current = { x: t.clientX, y: t.clientY, tx: zoomRef.current.tx, ty: zoomRef.current.ty };
+  }
+
+  function onTouchMove(e) {
+    if (mode === "vertical") return;
+    if (e.touches.length === 2 && pinchRef.current) {
+      const [a, b] = e.touches;
+      const p = pinchRef.current;
+      const ratio = _dist(a, b) / (p.startDist || 1);
+      const scale = Math.max(1, Math.min(MAX_ZOOM, p.startScale * ratio));
+      const pan = _clampPan(scale, p.startTx, p.startTy);
+      setZoom({ scale, ...pan });
+      e.preventDefault();                       // stop the page from rubber-banding
+      return;
+    }
+    // Single-finger drag while zoomed = pan the image.
+    if (e.touches.length === 1 && zoomRef.current.scale > 1.01 && touchRef.current) {
+      const t = e.touches[0];
+      const dx = t.clientX - touchRef.current.x;
+      const dy = t.clientY - touchRef.current.y;
+      const pan = _clampPan(zoomRef.current.scale, touchRef.current.tx + dx, touchRef.current.ty + dy);
+      setZoom((z) => ({ ...z, ...pan }));
+      e.preventDefault();
+    }
+  }
+  // Mouse zoom: ctrl+scroll (also what trackpad pinch emits) zooms in/out around
+  // center; plain scroll is left alone. Same clamp/reset rules as touch zoom.
+  function onWheelZoom(e) {
+    if (mode === "vertical" || !e.ctrlKey) return;
+    e.preventDefault();                     // stop the browser's own page zoom
+    const cur = zoomRef.current;
+    const factor = Math.exp(-e.deltaY * 0.002);   // smooth, direction-correct
+    const scale = Math.max(1, Math.min(MAX_ZOOM, cur.scale * factor));
+    const pan = scale <= 1.01 ? { tx: 0, ty: 0 } : _clampPan(scale, cur.tx, cur.ty);
+    setZoom({ scale, ...pan });
+  }
+
+  // (Mouse double-clicks need no separate handler — each click routes through
+  // handleTap, and the second one lands inside the pending-tap window → zoom.)
+
+  // Mouse-drag pans while zoomed (desktop counterpart of the one-finger pan).
+  // The drag starts on the canvas but move/up are tracked on WINDOW — a release
+  // that lands outside the canvas (or misses it due to the transformed child
+  // under the pointer) would otherwise leave stale drag state behind, which
+  // then swallows the next click/double-click as a phantom "end of drag".
+  // A real drag suppresses the click that follows, so releasing a pan doesn't
+  // also turn a page / toggle chrome via the tap zones.
+  const mouseDragRef = useRefRdr(null);
+  // When a mouse-drag pan ends. Suppresses only the CLICK that follows the
+  // release (so it doesn't hit the tap zones) — deliberately NOT double-click:
+  // a pan release can't accidentally produce one, and gating it here was
+  // swallowing real double-clicks right after a pan.
+  const dragEndRef = useRefRdr(0);
+  function onCanvasMouseDown(e) {
+    if (mode === "vertical" || !isZoomed || e.button !== 0) return;
+    mouseDragRef.current = { x: e.clientX, y: e.clientY, tx: zoomRef.current.tx, ty: zoomRef.current.ty, moved: false };
+  }
+  useEffectRdr(() => {
+    function onMove(e) {
+      const d = mouseDragRef.current;
+      if (!d) return;
+      const dx = e.clientX - d.x, dy = e.clientY - d.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true;
+      const pan = _clampPan(zoomRef.current.scale, d.tx + dx, d.ty + dy);
+      setZoom((z) => ({ ...z, ...pan }));
+    }
+    function onUp() {
+      const d = mouseDragRef.current;
+      mouseDragRef.current = null;
+      if (d && d.moved) dragEndRef.current = Date.now();
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+  }, []);
+
+  // React 18 attaches onTouchMove/onWheel passively, so preventDefault() there is a
+  // no-op. Bind both natively with { passive: false } so pinch/pan/ctrl-scroll can
+  // stop the browser's own scroll/zoom. Kept in refs so the listeners always call
+  // the latest closure (current `mode`) without re-binding on every render.
+  const moveHandlerRef = useRefRdr(onTouchMove);
+  moveHandlerRef.current = onTouchMove;
+  const wheelHandlerRef = useRefRdr(onWheelZoom);
+  wheelHandlerRef.current = onWheelZoom;
+  useEffectRdr(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const touchHandler = (e) => moveHandlerRef.current(e);
+    const wheelHandler = (e) => wheelHandlerRef.current(e);
+    el.addEventListener("touchmove", touchHandler, { passive: false });
+    el.addEventListener("wheel", wheelHandler, { passive: false });
+    return () => {
+      el.removeEventListener("touchmove", touchHandler);
+      el.removeEventListener("wheel", wheelHandler);
+    };
+  }, []);
+
   function onTouchEnd(e) {
     if (mode === "vertical") return;
+    // Finishing a pinch (a finger lifted, still >0 remaining): clear pinch state,
+    // don't treat the lift as a tap/swipe.
+    if (pinchRef.current) {
+      if (e.touches.length === 0) pinchRef.current = null;
+      touchHandledRef.current = Date.now();
+      return;
+    }
     const start = touchRef.current;
     touchRef.current = null;
     if (!start) return;
@@ -334,17 +523,56 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
     // Touch owns the tap/swipe; mark it so the synthesized click that follows is
     // ignored (React listeners are passive, so preventDefault isn't reliable).
     touchHandledRef.current = Date.now();
-    if (adx < 10 && ady < 10) { setChromeHidden((h) => !h); return; }   // tap
+    if (adx < 10 && ady < 10) {
+      // Tap → the unified tap system (shared with mouse clicks): double-tap
+      // anywhere toggles zoom; a lone tap acts after a short wait (edges turn
+      // the page, center toggles the chrome).
+      handleTap(start.x);
+      return;
+    }
+    // While zoomed, a drag pans (handled in move) — don't also turn the page.
+    if (isZoomed) return;
     if (adx > 45 && adx > ady * 1.5) {                                  // horizontal swipe
-      if (dx < 0) goToPage(page + 1);           // swipe left → next
-      else goToPage(page - 1);                  // swipe right → previous
+      if (dx < 0) turnPage(1);                  // swipe left → next spread
+      else turnPage(-1);                        // swipe right → previous spread
     }
   }
-  function onCanvasClick() {
-    // Ignore the click synthesized right after a touch gesture (handled above);
-    // genuine mouse clicks (no recent touch) toggle the chrome.
+
+  // --- Unified tap/click system (touch taps and mouse clicks both land here) ---
+  // A second tap within the window = double-tap → toggle zoom, ANYWHERE on the
+  // page (not just the center). To make that possible, a lone tap acts after a
+  // ~275ms wait: if the second tap arrives, the pending action is cancelled, so
+  // double-tapping an edge zooms instead of turning a page twice. Single-tap
+  // zones: left third = previous, right third = next, center = toggle chrome.
+  // While zoomed, edge taps don't page (they're likely pan slips), but the
+  // center tap still toggles chrome — so the bars can be dismissed mid-zoom.
+  const pendingTapRef = useRefRdr(null);
+  function handleTap(x) {
+    if (pendingTapRef.current) {
+      clearTimeout(pendingTapRef.current);
+      pendingTapRef.current = null;
+      setZoom((z) => (z.scale > 1.01 ? { scale: 1, tx: 0, ty: 0 } : { scale: 2.5, tx: 0, ty: 0 }));
+      return;
+    }
+    pendingTapRef.current = setTimeout(() => {
+      pendingTapRef.current = null;
+      const w = window.innerWidth;
+      const zoomed = zoomRef.current.scale > 1.01;
+      if (x < w * 0.33) { if (!zoomed) turnPage(-1); }
+      else if (x > w * 0.67) { if (!zoomed) turnPage(1); }
+      else setChromeHidden((h) => !h);
+    }, 275);
+  }
+  // Never leave a scheduled tap behind when the reader unmounts.
+  useEffectRdr(() => () => clearTimeout(pendingTapRef.current), []);
+
+  function onCanvasClick(e) {
+    // Ignore the click synthesized right after a touch gesture (handled above)
+    // or right after a mouse-drag pan release.
     if (Date.now() - touchHandledRef.current < 600) return;
-    setChromeHidden((h) => !h);
+    if (Date.now() - dragEndRef.current < 600) return;
+    if (mode === "vertical") { setChromeHidden((h) => !h); return; }
+    handleTap(e.clientX);
   }
 
   function handleClose() {
@@ -370,34 +598,6 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
       : mode === "single"
       ? [page]
       : [page, Math.min(page + 1, total)];
-
-  function PageImg({ p }) {
-    const f = flat[p - 1];
-    if (!f) return null;
-    const imgStyle = mode === "vertical"
-      ? { background: "#1a1a22" }
-      : {
-          background: "#1a1a22",
-          width: "100%",
-          height: "100%",
-          objectFit: "contain",
-          display: "block",
-        };
-    return (
-      <img
-        data-page={p}
-        className="page-img"
-        src={previewSource ? window.ApiClient.previewPageUrl(f.abs, previewSource) : window.pageUrl(f.abs)}
-        alt={`Page ${p}`}
-        // Vertical/webtoon mode has hundreds of pages — lazy-load those. But in
-        // single/double mode only 1–2 are shown, and lazy loading DELAYS the very
-        // image we're turning to, causing the harsh flash. Load those eagerly.
-        loading={mode === "vertical" ? "lazy" : "eager"}
-        decoding="async"
-        style={imgStyle}
-      />
-    );
-  }
 
   return (
     <div
@@ -479,12 +679,14 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
           double-fire. */}
       <div className="reader-canvas" ref={canvasRef}
         onClick={onCanvasClick}
+        onMouseDown={onCanvasMouseDown}
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
         style={mode !== "vertical" ? {
           display: "flex", alignItems: "center", justifyContent: "center",
           overflow: "hidden", padding: 0, gap: 4,
           position: "absolute", inset: 0,
+          touchAction: isZoomed ? "none" : "pan-y",
         } : undefined}
       >
         {total === 0 ? (
@@ -493,16 +695,32 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
             <p>No pages found for this series.</p>
           </div>
         ) : mode === "vertical" ? (
-          visible.map((p) => <PageImg key={p} p={p} />)
+          visible.map((p) => <PageImg key={p} p={p} flat={flat} mode={mode} previewSource={previewSource} />)
         ) : (
           // key={page} remounts the wrapper on every turn so the slide-in
           // animation replays; the direction class picks which side it enters from.
+          // The flip animation lives on the OUTER wrapper; the pinch-zoom transform
+          // on an INNER layer, so the two don't fight over `transform`.
           <div
             key={page}
             className={"page-flip " + (flipDir >= 0 ? "flip-fwd" : "flip-back")}
             style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 4, width: "100%", height: "100%" }}
           >
-            {visible.map((p) => <PageImg key={p} p={p} />)}
+            <div
+              className="page-zoom"
+              style={{
+                display: "flex", alignItems: "center", justifyContent: "center",
+                gap: 4, width: "100%", height: "100%",
+                transform: `translate(${zoom.tx}px, ${zoom.ty}px) scale(${zoom.scale})`,
+                // No transition while pinching (it must track the fingers); a short
+                // ease only when snapping via double-tap (scale changes with tx/ty 0).
+                transition: pinchRef.current ? "none" : "transform 140ms ease-out",
+                transformOrigin: "center center",
+                willChange: "transform",
+              }}
+            >
+              {visible.map((p) => <PageImg key={p} p={p} flat={flat} mode={mode} previewSource={previewSource} />)}
+            </div>
           </div>
         )}
       </div>
@@ -510,7 +728,7 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
       {/* Bottom bar */}
       <div className="reader-bottom" onClick={(e) => e.stopPropagation()}>
         <div className="page-slider">
-          <button className="icon-btn" onClick={() => goToPage(page - 1)} title="Previous page"><window.IconChevronLeft size={20} /></button>
+          <button className="icon-btn" onClick={() => turnPage(-1)} title="Previous page"><window.IconChevronLeft size={20} /></button>
           <input
             className="page-input"
             type="number"
@@ -544,10 +762,10 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
             <div className="knob" style={{ left: `${total ? (page / total) * 100 : 0}%` }} />
           </div>
           <span>{String(total).padStart(3, "0")}</span>
-          <button className="icon-btn" onClick={() => goToPage(page + 1)} title="Next page"><window.IconChevronRight size={20} /></button>
+          <button className="icon-btn" onClick={() => turnPage(1)} title="Next page"><window.IconChevronRight size={20} /></button>
         </div>
         <div style={{ display: "flex", justifyContent: "center", fontSize: 11, color: "rgba(255,255,255,0.55)", fontFamily: "var(--font-mono)" }}>
-          <span>Tap to {chromeHidden ? "show" : "hide"} chrome · Esc to exit · ←/→ pages</span>
+          <span>Tap edges to turn · center for chrome · double-tap zooms · Esc exits</span>
         </div>
       </div>
     </div>

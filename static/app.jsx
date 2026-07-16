@@ -79,7 +79,7 @@ function PreviewLoading({ onClose }) {
           <div className="preview-skel preview-skel-line" style={{ width: "80%" }} />
           <div className="preview-hint">Pulling the chapter list from the source — this can take a few seconds.</div>
         </div>
-        <button className="icon-btn preview-close" onClick={onClose} title="Close"><window.IconClose size={16} /></button>
+        <button className="icon-btn preview-close" onClick={onClose} title="Back to search"><window.IconArrowLeft size={16} /></button>
       </div>
       <div className="preview-chapters-head"><span>Chapters</span></div>
       <div className="preview-chapters">
@@ -152,7 +152,7 @@ function PreviewModal({ data, onClose, onReadChapter, onImport }) {
           </div>
           <div className="preview-hint">Reading a chapter streams it live — nothing is downloaded until you import.</div>
         </div>
-        <button className="icon-btn preview-close" onClick={onClose} title="Close"><window.IconClose size={16} /></button>
+        <button className="icon-btn preview-close" onClick={onClose} title="Back to search"><window.IconArrowLeft size={16} /></button>
       </div>
 
       <div className="preview-chapters-head">
@@ -246,6 +246,11 @@ function App() {
   const [activeLib, setActiveLib] = useState(null);   // active library id
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [showSwitcher, setShowSwitcher] = useState(window.Settings.showSwitcher);
+  // Hide-private mode: private libraries disappear from the switcher, the
+  // settings list and the move dialog (data untouched — just not shown), so the
+  // app can be handed to someone without private content being reachable.
+  const [hidePrivate, setHidePrivate] = useState(window.Settings.hidePrivate);
+  const visibleLibraries = hidePrivate ? libraries.filter((l) => !l.private) : libraries;
   // Auth gate: when the server requires a password, the page boots WITHOUT a
   // token. We show a login screen until the user logs in (or a previously stored
   // token still works). needsLogin === null means "still deciding".
@@ -289,13 +294,20 @@ function App() {
       // (default vs last-used) reflects saved preferences, not stale cache.
       await window.Settings.loadFromServer();
       setShowSwitcher(window.Settings.showSwitcher);
+      setHidePrivate(window.Settings.hidePrivate);
       const libs = await window.ApiClient.listLibraries();
       setLibraries(libs);
       let target = null;
       if (window.Settings.startMode === "last" && window.Settings.lastLibraryId != null) {
         target = libs.find((l) => l.id === window.Settings.lastLibraryId);
       }
+      // Hide-private mode must never OPEN a private library either (e.g. "last
+      // used" pointing at one) — fall back to the default/public choice.
+      if (target && target.private && window.Settings.hidePrivate) target = null;
       if (!target) target = libs.find((l) => l.is_default) || libs[0];
+      if (window.Settings.hidePrivate && target && target.private) {
+        target = libs.find((l) => !l.private) || null;
+      }
       if (target) {
         window.setActiveLibrary(target.id);
         setActiveLib(target.id);
@@ -488,7 +500,18 @@ function App() {
 
             <button className="btn ghost sm refresh-btn" title="Reload from database" onClick={reload}><window.IconCycle size={13} /> Refresh</button>
             <button className="btn ghost sm rescan-btn" title="Rescan folders on disk / add a library" onClick={() => setRescanOpen(true)}><window.IconSearch size={13} /> Rescan</button>
-            <button className="btn ghost sm addlink-btn" title="Import a series from a link" onClick={() => openAddLink("")}><window.IconPlus size={13} /> From link</button>
+            <button className="btn ghost sm syncall-btn" title="Check every imported series for new chapters"
+              onClick={() => {
+                window.ApiClient.resyncAll()
+                  .then((r) => window.toast(
+                    r.queued
+                      ? `Checking ${r.queued} series for new chapters…`
+                      : "No imported series to sync in this library.",
+                    r.queued ? "ok" : "info"))
+                  .catch((e) => window.toast(`Sync failed: ${e.message || e}`, "error"));
+              }}><window.IconCycle size={13} /> Sync</button>
+            {/* "From link" button removed — importing by URL still works by pasting
+                a link into the search bar (landing or overlay). */}
           </header>
         )}
 
@@ -508,7 +531,7 @@ function App() {
           {loaded && screen === "detail" && detail && (
             <window.Detail
               item={detail}
-              libraries={libraries}
+              libraries={visibleLibraries}
               refreshSignal={tick}
               onBack={goBackToLibrary}
               onMoveStarted={(title) => { goBackToLibrary(); moveCh.start("move", title); }}
@@ -579,13 +602,26 @@ function App() {
       )}
       {settingsOpen && (
         <SettingsModal
-          libraries={libraries}
+          libraries={visibleLibraries}
           activeLib={activeLib}
           onClose={() => setSettingsOpen(false)}
           onAddLibrary={() => { setSettingsOpen(false); setRescanOpen(true); }}
           onChanged={refreshLibraries}
           onSwitch={(id) => { setSettingsOpen(false); switchLibrary(id); }}
           onShowSwitcher={setShowSwitcher}
+          hidePrivate={hidePrivate}
+          onHidePrivate={(v) => {
+            setHidePrivate(v);
+            // Turning it ON while INSIDE a private library would leave hidden
+            // content on screen — hop to the first visible library.
+            if (v) {
+              const cur = libraries.find((l) => l.id === activeLib);
+              if (cur && cur.private) {
+                const pub = libraries.find((l) => !l.private);
+                if (pub) switchLibrary(pub.id);
+              }
+            }
+          }}
         />
       )}
       {/* Floating quick-switch button (bottom-right). Hidden inside the reader so
@@ -595,7 +631,7 @@ function App() {
           so Settings stays reachable everywhere. */}
       {loaded && !reader && (
         <LibrarySwitcher
-          libraries={libraries}
+          libraries={visibleLibraries}
           activeLib={activeLib}
           onSwitch={switchLibrary}
           onOpenSettings={() => setSettingsOpen(true)}
@@ -994,7 +1030,7 @@ function SourceExtensionsModal({ onClose }) {
 
 // ---------------------------------------------------------------------------
 // Settings + library management modal.
-function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged, onSwitch, onShowSwitcher }) {
+function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged, onSwitch, onShowSwitcher, hidePrivate: hidePrivateProp, onHidePrivate }) {
   const [startMode, setStartMode] = useState(window.Settings.startMode);
   const [confirmPrivate, setConfirmPrivate] = useState(window.Settings.confirmPrivate);
   const [showSwitcher, setShowSwitcher] = useState(window.Settings.showSwitcher);
@@ -1015,6 +1051,7 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
   function setStart(mode) { setStartMode(mode); window.Settings.set({ startMode: mode }); }
   function setConfirm(v) { setConfirmPrivate(v); window.Settings.set({ confirmPrivate: v }); }
   function setSwitcher(v) { setShowSwitcher(v); window.Settings.set({ showSwitcher: v }); onShowSwitcher(v); }
+  function setHidePriv(v) { window.Settings.set({ hidePrivate: v }); onHidePrivate?.(v); }
 
   async function savePassword(clear) {
     setPwMsg("");
@@ -1048,6 +1085,31 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
     setBusy(true);
     window.ApiClient.setDefaultLibrary(lib.id).then(onChanged).finally(() => setBusy(false));
   }
+  async function removeLib(lib) {
+    const ok = await window.confirmDialog({
+      title: `Remove “${lib.name}”?`,
+      message: `Removes this library and its ${lib.count} series from the app ONLY — the folder and all files on disk stay where they are. Hand-edited tags, notes and reading progress for its series are forgotten. You can re-add the folder later via Rescan.`,
+      confirmLabel: "Remove library",
+      tone: "warn",
+    });
+    if (!ok) return;
+    setBusy(true);
+    window.ApiClient.removeLibrary(lib.id)
+      .then((r) => {
+        window.toast(`Removed “${lib.name}” (${r.removed_series} series).`, "ok");
+        if (lib.id === activeLib) {
+          // The active library is gone — hop to the default (or first) remaining.
+          const rest = (r.libraries || []).filter((l) => l.id !== lib.id);
+          const next = rest.find((l) => l.is_default) || rest[0];
+          if (next) onSwitch(next.id);
+        } else {
+          onChanged();
+        }
+      })
+      .catch((e) => window.toast(`Remove failed: ${e.message || e}`, "error"))
+      .finally(() => setBusy(false));
+  }
+
   // Rescan just one library, polling the background scan until it finishes.
   function rescanOne(lib) {
     if (rescanningId) return;
@@ -1095,6 +1157,9 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
                     <button className="icon-btn sm" disabled={busy || !!rescanningId} onClick={() => rename(l)} title="Rename"><window.IconPencil size={13} /></button>
                     <button className={"icon-btn sm" + (l.private ? " on" : "")} disabled={busy || !!rescanningId} onClick={() => togglePrivate(l)} title={l.private ? "Mark public" : "Mark private"}><window.IconLock size={13} /></button>
                     {!l.is_default && <button className="icon-btn sm" disabled={busy || !!rescanningId} onClick={() => makeDefault(l)} title="Set as default">★</button>}
+                    {libraries.length > 1 && (
+                      <button className="icon-btn sm settings-lib-remove" disabled={busy || !!rescanningId} onClick={() => removeLib(l)} title="Remove from app (files on disk stay)"><window.IconTrash size={13} /></button>
+                    )}
                   </div>
                 </div>
               ))}
@@ -1138,6 +1203,13 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
                 <div className="settings-toggle-hint">Asks "are you sure?" before switching into a library marked private.</div>
               </div>
               <Toggle checked={confirmPrivate} onChange={setConfirm} />
+            </div>
+            <div className="settings-toggle-row">
+              <div className="settings-toggle-label">
+                <div>Hide private libraries</div>
+                <div className="settings-toggle-hint">Private libraries vanish from the switcher and this list until turned back off — nothing is deleted. Handy before handing the screen to someone.</div>
+              </div>
+              <Toggle checked={!!hidePrivateProp} onChange={setHidePriv} />
             </div>
           </div>
 

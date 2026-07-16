@@ -1164,7 +1164,8 @@ textarea {
   pointer-events: none;
   transform: translateY(100%);
 }
-.reader-top, .reader-bottom { transition: opacity 220ms, transform 220ms; }
+/* Chrome show/hide: a clear slide + fade (not a blink) when tapping the center. */
+.reader-top, .reader-bottom { transition: opacity 340ms ease, transform 340ms cubic-bezier(0.3, 0.7, 0.3, 1); }
 
 .reader-canvas {
   flex: 1;
@@ -1179,22 +1180,78 @@ textarea {
   width: 0;
 }
 
-/* Page-turn animation (single/double mode). The page slides in from the side
-   it's travelling toward with a slight perspective tilt + fade, reading like a
-   quick page flip. Honors prefers-reduced-motion. */
-.page-flip { transform-origin: center; will-change: transform, opacity; }
-.page-flip.flip-fwd  { animation: pageTurnFwd  260ms cubic-bezier(0.25, 0.8, 0.3, 1) both; }
-.page-flip.flip-back { animation: pageTurnBack 260ms cubic-bezier(0.25, 0.8, 0.3, 1) both; }
+/* Page-turn animation (single/double mode). The incoming page hinges in from the
+   edge it travels toward — anchored on that edge (transform-origin) and swinging
+   forward on the Y axis under the canvas's perspective, so it reads as a real page
+   flip rather than a flat cross-fade. A brief shadow sweep across the leading edge
+   adds depth. Honors prefers-reduced-motion. */
+.page-flip { will-change: transform, opacity; backface-visibility: hidden; position: relative; }
+.page-flip.flip-fwd  { transform-origin: right center; animation: pageTurnFwd  420ms cubic-bezier(0.22, 0.61, 0.28, 1) both; }
+.page-flip.flip-back { transform-origin: left center;  animation: pageTurnBack 420ms cubic-bezier(0.22, 0.61, 0.28, 1) both; }
+/* The shadow sweep: a gradient overlay that fades out as the page settles. */
+.page-flip.flip-fwd::after,
+.page-flip.flip-back::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  animation: pageShadow 420ms ease-out both;
+}
+.page-flip.flip-fwd::after  { background: linear-gradient(90deg, rgba(0,0,0,0.35), transparent 45%); }
+.page-flip.flip-back::after { background: linear-gradient(270deg, rgba(0,0,0,0.35), transparent 45%); }
 @keyframes pageTurnFwd {
-  from { opacity: 0; transform: translateX(8%) rotateY(-12deg) scale(0.98); }
-  to   { opacity: 1; transform: translateX(0)  rotateY(0)      scale(1); }
+  from { opacity: 0.2; transform: translateX(18%) rotateY(-32deg); }
+  60%  { opacity: 1; }
+  to   { opacity: 1; transform: translateX(0)    rotateY(0); }
 }
 @keyframes pageTurnBack {
-  from { opacity: 0; transform: translateX(-8%) rotateY(12deg) scale(0.98); }
-  to   { opacity: 1; transform: translateX(0)   rotateY(0)     scale(1); }
+  from { opacity: 0.2; transform: translateX(-18%) rotateY(32deg); }
+  60%  { opacity: 1; }
+  to   { opacity: 1; transform: translateX(0)     rotateY(0); }
 }
+@keyframes pageShadow {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* Double-page mode: turn like a REAL book. The whole-spread slide is replaced by
+   a quick settle, and the page nearest the spine folds open around it — forward
+   turns fold the incoming RIGHT page out from the spine; backward turns fold the
+   incoming LEFT page. The fold starts nearly edge-on (like a page mid-turn),
+   darkened as if angled away from the light, and settles flat. */
+/* No whole-spread fade: the resting page must be SOLID from the first frame —
+   fading it in made the spread "materialize" halfway through the turn. All the
+   motion belongs to the folding page alone, like a real book. */
+.reader-mode-double .page-flip.flip-fwd,
+.reader-mode-double .page-flip.flip-back { animation: none; }
+/* The whole-spread shadow sweep reads wrong on a book fold — the fold's own
+   brightness shading carries the depth instead. */
+.reader-mode-double .page-flip.flip-fwd::after,
+.reader-mode-double .page-flip.flip-back::after { content: none; }
+.reader-mode-double .page-flip .page-zoom { perspective: 1400px; }
+.reader-mode-double .page-flip.flip-fwd .page-zoom img:nth-child(2) {
+  transform-origin: left center;   /* hinge on the spine */
+  animation: pageFoldFwd 650ms cubic-bezier(0.25, 0.6, 0.3, 1) both;
+}
+.reader-mode-double .page-flip.flip-back .page-zoom img:nth-child(1) {
+  transform-origin: right center;  /* spine is on this page's right */
+  animation: pageFoldBack 650ms cubic-bezier(0.25, 0.6, 0.3, 1) both;
+}
+/* Start EXACTLY edge-on (90°): the turning page begins invisible and its face is
+   revealed continuously as it swings open — no pop-in partway through. */
+@keyframes pageFoldFwd {
+  from { transform: rotateY(-90deg); filter: brightness(0.4); }
+  60%  { filter: brightness(0.9); }
+  to   { transform: rotateY(0);      filter: brightness(1); }
+}
+@keyframes pageFoldBack {
+  from { transform: rotateY(90deg); filter: brightness(0.4); }
+  60%  { filter: brightness(0.9); }
+  to   { transform: rotateY(0);     filter: brightness(1); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .page-flip.flip-fwd, .page-flip.flip-back { animation: none; }
+  .page-flip.flip-fwd::after, .page-flip.flip-back::after { animation: none; content: none; }
+  .reader-mode-double .page-flip.flip-fwd .page-zoom img:nth-child(2),
+  .reader-mode-double .page-flip.flip-back .page-zoom img:nth-child(1) { animation: none; }
 }
 
 /* Vertical / webtoon mode */
@@ -2123,6 +2180,19 @@ textarea {
 /* Rail card overlay (landing) — identical lifted strip */
 .rail-card-cover {
   isolation: isolate;
+}
+/* Library remove (trash) — red on hover so it reads as the destructive action. */
+.settings-lib-remove:hover { color: #e74c3c; border-color: rgba(231, 76, 60, 0.6); }
+
+/* "New chapters" tag on a Continue Reading card — set when a re-sync downloaded
+   chapters past a caught-up read position; cleared once reading resumes. */
+.rail-card-new {
+  position: absolute; top: 8px; left: 8px; z-index: 1;
+  padding: 3px 7px; border-radius: 5px;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em;
+  color: #0b0b10; background: var(--vermillion);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
 }
 .rail-card-overlay {
   position: absolute;
@@ -4170,9 +4240,18 @@ textarea.detail-field-input {
   .info-table { font-size: 13px; }
 
   /* Reader chrome: bigger touch targets, wrap the controls, stack the bottom
-     bar so the slider gets full width. The tap-to-toggle-chrome already works. */
-  .reader-top { height: auto; min-height: 56px; padding: 8px 12px; flex-wrap: wrap; gap: 8px; }
-  .reader-controls { flex: 1 1 100%; justify-content: flex-end; flex-wrap: wrap; }
+     bar so the slider gets full width. The tap-to-toggle-chrome already works.
+     The wrapped (taller) header needs a solid-enough backdrop the full way down —
+     the desktop gradient fades out before the second row, leaving buttons floating
+     on the page image — and the control rows read best as one row, chapter-nav
+     on the left, mode toggle on the right. */
+  .reader-top {
+    height: auto; min-height: 56px; padding: 8px 12px 12px;
+    flex-wrap: wrap; gap: 8px 10px;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.92) 0%, rgba(0, 0, 0, 0.82) 75%, rgba(0, 0, 0, 0));
+  }
+  .reader-controls { flex: 1 1 100%; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+  .reader-chapter-nav { flex-wrap: wrap; }
   .reader-bottom { padding: 12px 12px 16px; }
   .reader-mode-toggle button { padding: 8px 10px; }  /* easier to tap */
   .reader .icon-btn { width: 44px; height: 44px; }   /* 44px = comfortable touch target */

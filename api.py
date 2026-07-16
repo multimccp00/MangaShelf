@@ -736,6 +736,7 @@ _SETTINGS_DEFAULTS: dict[str, Any] = {
     "startMode": "default",      # "default" | "last"
     "confirmPrivate": True,
     "showSwitcher": True,
+    "hidePrivate": False,        # hide private libraries from the UI (not delete)
     "lastLibraryId": None,
 }
 
@@ -1588,6 +1589,24 @@ def set_default_library(library_id: int) -> dict[str, Any]:
     return {"ok": True, "libraries": list_libraries()}
 
 
+@app.delete("/api/libraries/{library_id}", dependencies=[Depends(require_token)])
+def remove_library(library_id: int) -> dict[str, Any]:
+    """Remove a library (and its series records) from the APP ONLY — nothing on
+    disk is deleted; re-adding the folder later rescans it back. Refuses to remove
+    the last remaining library (the app needs at least one)."""
+    libs = _db.get_libraries()
+    if not any(int(l.get("id", -1)) == library_id for l in libs):
+        raise HTTPException(status_code=404, detail="Library not found")
+    if len(libs) <= 1:
+        raise HTTPException(status_code=400, detail="Can't remove the last library.")
+    removed = _db.remove_library(library_id)
+    # Drop caches that may reference the removed series so nothing stale lingers.
+    with _CACHE_LOCK:
+        _COVER_PATH_CACHE.clear()
+    _invalidate_chapters_cache()
+    return {"ok": True, "removed_series": removed, "libraries": list_libraries()}
+
+
 @app.get("/api/browse", dependencies=[Depends(require_token_read)])
 def browse_dirs(path: str = Query(default="")) -> dict[str, Any]:
     """List subdirectories of `path` so the UI can pick a library folder. With no
@@ -1650,6 +1669,11 @@ def _run_rescan(add_path: str | None, add_name: str | None = None,
             _COVER_PATH_CACHE.clear()
         _invalidate_chapters_cache()   # all of them — folders may have changed
     except Exception as exc:  # noqa: BLE001
+        # Full traceback to the server log — a bare str(exc) like "FOREIGN KEY
+        # constraint failed" gives no line number, making scan failures
+        # near-impossible to diagnose after the fact.
+        import traceback
+        traceback.print_exc()
         with _RESCAN_LOCK:
             _RESCAN_STATE.update(running=False, done=True, error=str(exc))
 
@@ -2035,13 +2059,37 @@ def _execute_job(job: dict[str, Any], scan_and_sync) -> None:
         src = find_by_name(job["source"])
         if not src:
             raise ValueError(f"The source adapter for '{job['source']}' isn't available.")
+        # Was the reader caught up BEFORE this sync (read to the end of what was on
+        # disk)? If so and the sync brings new pages, flag the series so Continue
+        # Reading bumps it to the front — "a series you finished just got more".
+        caught_up = False
+        sid_before = _db.series_id_for_folder(job["folder"])
+        if sid_before:
+            row_before = _db.get_series_by_id(sid_before)
+            with _CACHE_LOCK:
+                total_before = _PAGE_COUNTS.get(str(sid_before))
+            if row_before and total_before:
+                caught_up = int(row_before.get("last_page") or 0) >= int(total_before)
         _job_set(job, message="Checking for new chapters…")
         meta = src.fetch_series(job["url"])
         _job_set(job, title=meta.title, total=len(meta.chapters),
                  message=f"Syncing {len(meta.chapters)} chapters…")
         result = download_series(src, meta, str(Path(job["folder"]).parent),
                                  progress=progress, dest_dir=job["folder"])
-        job["done_message"] = "Up to date."
+        new_pages = int(result.get("new_pages", 0))
+        job["done_message"] = f"{new_pages} new pages." if new_pages else "Up to date."
+        if new_pages and sid_before:
+            if caught_up:
+                try:
+                    _db.set_fresh_chapters(sid_before, True)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[resync] fresh-chapters flag failed: {exc}")
+            # The cached page total is now stale (new pages on disk). Drop it so
+            # the next library listing re-counts (via the background warm-up)
+            # instead of showing the old total.
+            with _CACHE_LOCK:
+                _PAGE_COUNTS.pop(str(sid_before), None)
+            _save_page_counts()
     else:  # import
         src = find_source(job["url"])
         if not src:
@@ -2383,6 +2431,33 @@ def resync_series(series_id: int) -> dict[str, Any]:
     with _JOB_LOCK:
         queued = sum(1 for j in _JOBS if j["status"] == "queued")
     return {"ok": True, "id": job["id"], "queued": queued}
+
+
+@app.post("/api/resync-all", dependencies=[Depends(require_token)])
+def resync_all(library: int | None = None) -> dict[str, Any]:
+    """Queue a re-sync for EVERY imported series in the library (those with a
+    known origin) — the one-click "check everything for new chapters". Series
+    whose adapter/folder is unavailable are skipped, as are ones already in the
+    queue. Jobs run one at a time on the existing import worker; the UI's usual
+    job indicator shows progress."""
+    rows = _db.get_series_list(library_id=library)
+    with _JOB_LOCK:
+        pending_folders = {str(j.get("folder") or "")
+                           for j in _JOBS if j["status"] in ("queued", "running")}
+    queued = 0
+    skipped = 0
+    for data in rows:
+        info = source_info(str(data.get("external_id") or ""))
+        folder = str(data.get("folder_path") or "")
+        if (not info or not info.get("url") or not find_by_name(info["source"])
+                or not folder or folder in pending_folders or not Path(folder).is_dir()):
+            skipped += 1
+            continue
+        _enqueue_job("resync", url=info["url"], source=info["source"],
+                     library_id=data.get("library_id"), folder=folder,
+                     title=data.get("title") or "")
+        queued += 1
+    return {"ok": True, "queued": queued, "skipped": skipped}
 
 
 @app.get("/api/settings", dependencies=[Depends(require_token_read)])

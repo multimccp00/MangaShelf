@@ -86,6 +86,9 @@ function normalize(row) {
     total_pages: total,
     // where this series was imported from ({source,label,id,url}), or null
     origin: row.origin || null,
+    // re-sync found chapters newer than a caught-up read position (drives the
+    // Continue Reading priority + "NEW CH" badge; cleared on next progress save)
+    fresh_chapters: !!row.fresh_chapters,
   };
 }
 
@@ -250,6 +253,7 @@ const Settings = {
   startMode: loadSettings().startMode || "default",   // "default" | "last"
   confirmPrivate: loadSettings().confirmPrivate !== false,  // default on
   showSwitcher: loadSettings().showSwitcher !== false,      // default on
+  hidePrivate: loadSettings().hidePrivate === true,         // default off
   lastLibraryId: loadSettings().lastLibraryId ?? null,
 
   _snapshot() {
@@ -257,6 +261,7 @@ const Settings = {
       startMode: this.startMode,
       confirmPrivate: this.confirmPrivate,
       showSwitcher: this.showSwitcher,
+      hidePrivate: this.hidePrivate,
       lastLibraryId: this.lastLibraryId,
     };
   },
@@ -280,6 +285,7 @@ const Settings = {
         if (s.startMode != null) this.startMode = s.startMode;
         if (s.confirmPrivate != null) this.confirmPrivate = !!s.confirmPrivate;
         if (s.showSwitcher != null) this.showSwitcher = !!s.showSwitcher;
+        if (s.hidePrivate != null) this.hidePrivate = !!s.hidePrivate;
         if (s.lastLibraryId !== undefined) this.lastLibraryId = s.lastLibraryId;
         saveSettings(this._snapshot());       // refresh the local cache
       }
@@ -350,6 +356,11 @@ const ApiClient = {
   },
   setDefaultLibrary(id) {
     return postJSON(`${API}/libraries/${id}/default`, {});
+  },
+  // Remove a library from the app (DB records only — files on disk untouched).
+  removeLibrary(id) {
+    return fetch(`${API}/libraries/${id}`, { method: "DELETE", headers: authHeaders() })
+      .then((r) => { if (!r.ok) return r.json().then((b) => { throw new Error(b.detail || r.status); }); return r.json(); });
   },
   saveProgress(id, chapterName, page) {
     return postJSON(`${API}/series/${id}/progress`, { chapter_name: chapterName, page });
@@ -501,6 +512,12 @@ const ApiClient = {
   // reported on the shared import status endpoint (scrapeStatus).
   resyncSeries(id) {
     return postJSON(`${API}/series/${id}/resync`, {});
+  },
+  // Queue a re-sync for EVERY imported series in the active library ("check all
+  // for new chapters"). Same shared queue/status endpoint as single re-syncs.
+  resyncAll() {
+    const lib = window.getActiveLibrary ? window.getActiveLibrary() : null;
+    return postJSON(`${API}/resync-all${lib != null ? `?library=${lib}` : ""}`, {});
   },
   // Rename a chapter folder (number + optional title combine into the name).
   renameChapter(id, oldName, number, title) {

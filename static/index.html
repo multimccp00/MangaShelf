@@ -8,6 +8,14 @@
   <link rel="icon" type="image/png" href="icons/custom-favicon-16.png?v=icon3" sizes="16x16" />
   <link rel="apple-touch-icon" href="icons/custom-apple-touch-icon.png?v=icon3" />
   <meta name="theme-color" content="#0b0b10" />
+  <!-- PWA: lets phones "Add to Home Screen" and launch fullscreen (standalone).
+       Deliberately NO service worker — the app needs the server anyway, and a
+       stale offline cache is worse than none. -->
+  <link rel="manifest" href="manifest.json" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="MangaShelf" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Serif+JP:wght@400;500;700&family=Zen+Tokyo+Zoo&display=swap" rel="stylesheet" />

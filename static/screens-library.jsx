@@ -37,13 +37,15 @@ function Landing({ onOpenDetail, onOpenSearch, onImportLink, onBrowse, density }
   const [delTick, setDelTick] = useStateScr(0);   // bump to re-render after a delete
   const items = window.STORE.items;
 
-  // Continue Reading — only series you're actively reading or plan to read
-  // (NOT Completed, Dropped, On Hold, or untouched). Most-recently-read first,
-  // then Planned-to-Read that haven't been opened yet.
+  // Continue Reading — series you're actively reading or plan to read, PLUS any
+  // series that just re-synced new chapters while you were caught up
+  // (fresh_chapters — those may sit at "Completed" and would otherwise be
+  // filtered out; they're exactly the ones you want to jump back into). Fresh
+  // ones lead the rail; then Reading before Planned, most recent first.
   const continueRail = items
-    .filter((c) => c.status === "Reading" || c.status === "Planned to Read")
+    .filter((c) => c.fresh_chapters || c.status === "Reading" || c.status === "Planned to Read")
     .sort((a, b) => {
-      // Reading before Planned; within each, most recent last_read first.
+      if (!!b.fresh_chapters !== !!a.fresh_chapters) return b.fresh_chapters ? 1 : -1;
       const rank = (s) => (s === "Reading" ? 0 : 1);
       if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
       return String(b.last_read || "").localeCompare(String(a.last_read || ""));

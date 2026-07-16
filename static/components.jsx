@@ -616,6 +616,8 @@ function RailCard({ item, onOpen, onDeleted }) {
     >
       <div className="rail-card-cover">
         <CoverImg item={item} onLoad={() => setImgReady(true)} />
+        {/* Re-sync found chapters newer than the caught-up read position. */}
+        {!!item.fresh_chapters && <span className="rail-card-new">NEW CH</span>}
         <div className="rail-card-overlay" style={stripStyle}>
           <div className="rail-card-title">{item.title}</div>
           <div className="rail-card-sub cover-meta">
@@ -772,7 +774,11 @@ function Modal({ onClose, panelClass, labelledBy, children, dismissable = true }
   // CSS z-index; +1 per depth keeps a nested modal (and its backdrop) on top.
   const overlayStyle = depth > 0 ? { zIndex: 40 + depth } : undefined;
 
-  return (
+  // PORTAL to <body>: a modal opened from deep inside a screen (e.g. Move on the
+  // detail page) would otherwise live inside whatever stacking context its parent
+  // chain creates — trapping the overlay's z-index below the topbar, which then
+  // paints over the dialog. From <body>, z-index 40 always beats the chrome.
+  return ReactDOM.createPortal(
     <div className="search-overlay" style={overlayStyle} onClick={dismissable ? onClose : undefined}>
       <div
         className={panelClass}
@@ -785,7 +791,8 @@ function Modal({ onClose, panelClass, labelledBy, children, dismissable = true }
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
