@@ -125,3 +125,25 @@ def test_prune_only_removes_rows_outside_valid_set(db, tmp_path):
     assert removed == 1
     assert db.conn.execute("SELECT COUNT(*) FROM series WHERE id=?", (keep,)).fetchone()[0] == 1
     assert db.conn.execute("SELECT COUNT(*) FROM series WHERE id=?", (stale,)).fetchone()[0] == 0
+
+
+# ------------------------------------------------------------ server search --
+
+def test_search_matches_all_haystack_fields(db, tmp_path):
+    lib = tmp_path / "lib"
+    lib_id = db.add_library(str(lib), name="L")
+    sid = _mk_series(db, lib_id, lib / "S", "Solo Leveling")
+    db.conn.execute("UPDATE series SET author='Chugong', notes='great art', language='EN' WHERE id=?", (sid,))
+    db.conn.execute("INSERT INTO tags(series_id, tag) VALUES (?, 'manhwa')", (sid,))
+    db.conn.commit()
+    other = _mk_series(db, lib_id, lib / "T", "Totally Different")
+
+    def ids(q):
+        return {r["id"] for r in db.get_series_list(search=q, library_id=lib_id)}
+
+    assert ids("solo") == {sid}          # title
+    assert ids("chugong") == {sid}       # author
+    assert ids("manhwa") == {sid}        # tag
+    assert ids("great art") == {sid}     # notes, multi-word AND
+    assert ids("solo different") == set()  # AND across words narrows to nothing
+    assert ids("") >= {sid, other}       # empty = everything

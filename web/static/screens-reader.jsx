@@ -804,6 +804,22 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
   const all = window.STORE.items;
   const facets = window.STORE.facets;
 
+  // Server-side library search: with a query, ask SQL instead of scanning the
+  // whole client-side haystack — same fields (title/series/author/language/
+  // notes/tags/genres, AND across words) but it stays fast as the library grows
+  // past what the browser can comfortably re-filter per keystroke. null = no
+  // query → browse the full STORE as before. Stale responses are dropped.
+  const [serverRows, setServerRows] = useStateRdr(null);
+  const searchReqRef = useRefRdr(0);
+  useEffectRdr(() => {
+    const q = debouncedQ.trim();
+    if (!q || /^https?:\/\//i.test(q)) { setServerRows(null); return; }
+    const myReq = ++searchReqRef.current;
+    window.ApiClient.listSeries({ search: q })
+      .then((rows) => { if (myReq === searchReqRef.current) setServerRows(rows); })
+      .catch(() => { if (myReq === searchReqRef.current) setServerRows(null); });  // fall back to client filter
+  }, [debouncedQ]);
+
   // Reset web results whenever the query changes (they're for the old query).
   useEffectRdr(() => { setWebResults(null); setWebErr(""); }, [debouncedQ]);
 
@@ -878,8 +894,12 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
   // query and the active filters/sort, so re-renders from typing (before the
   // debounce fires) don't re-scan the whole library.
   const results = useMemoRdr(() => {
-    const terms = debouncedQ.toLowerCase().split(/\s+/).filter(Boolean);
-    let out = all.filter((c) => {
+    // With a query, the server already text-filtered (serverRows); the client
+    // haystack only runs as a fallback while a response is pending/failed.
+    // Tag/status/genre pills always refine client-side on whatever base we have.
+    const base = serverRows != null ? serverRows : all;
+    const terms = serverRows != null ? [] : debouncedQ.toLowerCase().split(/\s+/).filter(Boolean);
+    let out = base.filter((c) => {
       if (terms.length) {
         const hay = [
           c.title, c.author, c.series, c.language, c.notes,
@@ -903,7 +923,7 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
     });
     else out = [...out].sort((a, b) => randomRank[a.id] - randomRank[b.id]); // default: random
     return out;
-  }, [all, debouncedQ, activeTags, activeStatus, activeGenre, sort, randomRank]);
+  }, [all, serverRows, debouncedQ, activeTags, activeStatus, activeGenre, sort, randomRank]);
 
   // Cap how many result cards we render — drawing thousands at once freezes the
   // browser. Show the first RESULT_CAP and tell the user to narrow the search.

@@ -493,9 +493,22 @@ class Database:
             params.append(library_id)
 
         if search.strip():
-            where_parts.append("(LOWER(s.title) LIKE ? OR LOWER(COALESCE(s.series_name, '')) LIKE ?)")
-            needle = f"%{search.strip().lower()}%"
-            params.extend([needle, needle])
+            # Every term must match SOMEWHERE (AND), mirroring the client-side
+            # search haystack: title, series, author, language, notes, tags,
+            # genres. Multi-word queries narrow instead of widening.
+            for term in search.strip().lower().split():
+                where_parts.append(
+                    "("
+                    "LOWER(s.title) LIKE ? OR LOWER(COALESCE(s.series_name,'')) LIKE ? "
+                    "OR LOWER(COALESCE(s.author,'')) LIKE ? OR LOWER(COALESCE(s.language,'')) LIKE ? "
+                    "OR LOWER(COALESCE(s.notes,'')) LIKE ? "
+                    "OR EXISTS (SELECT 1 FROM tags tt WHERE tt.series_id = s.id AND LOWER(tt.tag) LIKE ?) "
+                    "OR EXISTS (SELECT 1 FROM series_genres sg2 JOIN genres g2 ON g2.id = sg2.genre_id "
+                    "           WHERE sg2.series_id = s.id AND LOWER(g2.name) LIKE ?)"
+                    ")"
+                )
+                needle = f"%{term}%"
+                params.extend([needle] * 7)
 
         if filter_mode == "Favorites":
             where_parts.append("s.favorite = 1")
