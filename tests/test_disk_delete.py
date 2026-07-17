@@ -12,7 +12,7 @@ import pytest
 @pytest.fixture(scope="module")
 def client_and_token():
     from fastapi.testclient import TestClient
-    import web.api as api
+    import api
     client = TestClient(api.app)
     token = (Path.home() / ".mangashelf" / "web_token.txt").read_text().strip()
     return client, token, api
