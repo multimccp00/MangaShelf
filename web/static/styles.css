@@ -3949,18 +3949,14 @@ textarea.detail-field-input {
   pointer-events: auto;
 }
 .lib-switcher-gear:hover { background: var(--ink-2); border-color: var(--ink-4); color: white; }
-/* Touch devices: there is no hover to reveal the gear, so it must simply BE
-   there. Hiding it left Settings reachable only by long-pressing the FAB — an
-   invisible gesture. A tap also triggers sticky :hover on touch, so visibility
-   is pinned outright rather than tied to hover state. */
+/* Touch devices: no hover, so only show the gear when it must always be shown
+   (single library — the FAB can't cycle, so long-press would feel arbitrary).
+   Otherwise Settings is a long-press on the FAB and the gear stays out of the
+   way. A tap also triggers sticky :hover on touch, which used to make the gear
+   flicker/vanish when tapped — so don't tie visibility to hover here at all. */
 @media (hover: none) {
-  .lib-switcher-gear,
-  .lib-switcher:hover .lib-switcher-gear,
-  .lib-switcher-gear.always {
-    opacity: 1 !important;
-    transform: translateY(0) scale(1) !important;
-    pointer-events: auto !important;
-  }
+  .lib-switcher:hover .lib-switcher-gear:not(.always) { opacity: 0; pointer-events: none; }
+  .lib-switcher-gear.always { opacity: 1 !important; transform: translateY(0) scale(1) !important; pointer-events: auto !important; }
 }
 
 .settings-modal {
@@ -4359,8 +4355,9 @@ textarea.detail-field-input {
      action buttons onto a second line. The coloured bubble + glyph still conveys
      the state at a glance. */
   /* Library rows: the actions (up to 5 buttons + "Open") can't share a line with
-     the name on a phone — they crushed it to "B..". Stack instead: dot + name +
-     path on top, the full action row underneath at comfortable tap size. */
+     the name on a phone — they crushed it to "B..". So the row shows just the
+     name + path, and TAPPING it expands the actions underneath (see .expanded).
+     Only one row is expanded at a time, so the list stays scannable. */
   .settings-lib-row {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -4368,6 +4365,7 @@ textarea.detail-field-input {
     align-items: center;
     gap: 4px 9px;
     padding: 12px 10px;
+    cursor: pointer;
   }
   .settings-lib-dot { grid-area: dot; }
   .settings-lib-main { grid-area: main; }
@@ -4376,7 +4374,29 @@ textarea.detail-field-input {
     justify-content: flex-start;
     flex-wrap: wrap;
     gap: 6px;
-    margin-top: 8px;
+    /* Collapsed by default; the row's own tap reveals it. */
+    display: none;
+  }
+  .settings-lib-row.expanded .settings-lib-actions {
+    display: flex;
+    margin-top: 10px;
+    animation: libActionsIn 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  /* A chevron marks the row as tappable and points down once it's open. */
+  .settings-lib-main { position: relative; padding-right: 18px; }
+  .settings-lib-main::after {
+    content: "";
+    position: absolute; right: 2px; top: 8px;
+    width: 7px; height: 7px;
+    border-right: 1.5px solid var(--muted);
+    border-bottom: 1.5px solid var(--muted);
+    transform: rotate(-45deg);
+    transition: transform 180ms ease;
+  }
+  .settings-lib-row.expanded .settings-lib-main::after { transform: rotate(45deg); }
+  @keyframes libActionsIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
   }
   .settings-lib-badge .badge-text { display: none; }
   .settings-lib-badge { padding: 4px; width: 20px; height: 20px; justify-content: center; }

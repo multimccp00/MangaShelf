@@ -1036,6 +1036,9 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
   const [showSwitcher, setShowSwitcher] = useState(window.Settings.showSwitcher);
   const [busy, setBusy] = useState(false);
   const [rescanningId, setRescanningId] = useState(null);   // library id currently rescanning
+  // Which library row has its actions expanded (mobile — see the breakpoint CSS).
+  // One at a time keeps the list scannable.
+  const [expandedLib, setExpandedLib] = useState(null);
   const [extOpen, setExtOpen] = useState(false);            // Source extensions manager open?
 
   // Password gate state.
@@ -1142,7 +1145,15 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
             <div className="settings-section-hint">Each library is a separate folder. Switch between them with the floating button.</div>
             <div className="settings-lib-list">
               {libraries.map((l) => (
-                <div key={l.id} className={"settings-lib-row" + (l.id === activeLib ? " active" : "")}>
+                <div
+                  key={l.id}
+                  className={"settings-lib-row" + (l.id === activeLib ? " active" : "") + (expandedLib === l.id ? " expanded" : "")}
+                  // Phones can't fit the actions beside the name, so they're
+                  // hidden until the row is tapped (CSS reveals them under the
+                  // mobile breakpoint; on desktop they're always shown and this
+                  // just toggles a harmless class).
+                  onClick={() => setExpandedLib((cur) => (cur === l.id ? null : l.id))}
+                >
                   <span className={"settings-lib-dot" + (l.online ? " on" : "")} title={l.online ? "Online" : "Folder offline"} />
                   <div className="settings-lib-main">
                     <div className="settings-lib-name">
@@ -1153,7 +1164,8 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
                     </div>
                     <div className="settings-lib-path" title={l.path}>{l.path} · {l.count} series</div>
                   </div>
-                  <div className="settings-lib-actions">
+                  {/* Clicks on the actions must not collapse the row again. */}
+                  <div className="settings-lib-actions" onClick={(e) => e.stopPropagation()}>
                     {l.id !== activeLib && <button className="btn ghost sm" disabled={busy || !!rescanningId} onClick={() => onSwitch(l.id)}>Open</button>}
                     <button className={"icon-btn sm" + (rescanningId === l.id ? " spinning" : "")} disabled={busy || !!rescanningId} onClick={() => rescanOne(l)} title="Rescan this library"><window.IconCycle size={13} /></button>
                     <button className="icon-btn sm" disabled={busy || !!rescanningId} onClick={() => rename(l)} title="Rename"><window.IconPencil size={13} /></button>
