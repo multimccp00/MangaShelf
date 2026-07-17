@@ -1505,15 +1505,21 @@ textarea {
 }
 .confirm-title {
   display: flex;
-  align-items: center;
-  gap: 9px;
-  font-family: var(--font-display);
-  font-size: 19px;
-  font-weight: 400;
+  align-items: flex-start;            /* long titles wrap — keep the icon on line 1 */
+  gap: 10px;
+  /* Sans, not the display face: these titles quote user content (series names
+     with brackets/CJK) that the small-caps display font renders unreadable. */
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
   color: var(--text);
-  margin-bottom: 10px;
+  margin-bottom: 8px;
+  /* Very long names shouldn't push the dialog into a wall of text. */
+  max-height: 4.2em;
+  overflow: hidden;
 }
-.confirm-title svg { flex-shrink: 0; }
+.confirm-title svg { flex-shrink: 0; margin-top: 3px; }
 .confirm-title.tone-danger svg { color: #e74c3c; }
 .confirm-title.tone-warn svg { color: #b06fd0; }
 .confirm-title.tone-default svg { color: var(--muted); }
@@ -1522,12 +1528,13 @@ textarea {
   line-height: 1.55;
   color: var(--text-dim, #b6b6c2);
   white-space: pre-line;              /* honour \n in messages */
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 .confirm-actions {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+  margin-top: 18px;                   /* clear air between options and buttons */
 }
 .confirm-btn {
   height: 38px;
@@ -2184,14 +2191,31 @@ textarea {
 /* Library remove (trash) — red on hover so it reads as the destructive action. */
 .settings-lib-remove:hover { color: #e74c3c; border-color: rgba(231, 76, 60, 0.6); }
 
-/* Opt-in checkboxes inside the confirm dialog (e.g. "also recycle files"). */
+/* Opt-in checkboxes inside the confirm dialog (e.g. "also recycle files").
+   Grouped in their own inset panel so they read as OPTIONS you're choosing —
+   distinct from the message above and the buttons below. */
+.confirm-checks {
+  background: var(--ink-2);
+  border: 1px solid var(--ink-3);
+  border-radius: 10px;
+  padding: 4px 12px;
+}
 .confirm-check {
-  display: flex; align-items: flex-start; gap: 9px;
-  margin: 10px 0 0; font-size: 13px; color: var(--text);
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 0;
+  font-size: 13px; line-height: 1.45; color: var(--text);
   cursor: pointer; user-select: none;
 }
-.confirm-check input { margin-top: 2px; accent-color: var(--vermillion); }
-.confirm-check-hint { display: block; font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.confirm-check + .confirm-check { border-top: 1px solid var(--ink-3); }
+.confirm-check:hover { color: #fff; }
+.confirm-check input {
+  margin: 1px 0 0; width: 15px; height: 15px; flex-shrink: 0;
+  accent-color: var(--vermillion); cursor: pointer;
+}
+.confirm-check-hint { display: block; font-size: 11.5px; line-height: 1.4; color: var(--muted); margin-top: 3px; }
+/* The destructive option gets a red tint once it's actually armed. */
+.confirm-check.is-danger:has(input:checked) { color: #ff8a7a; }
+.confirm-check.is-danger:has(input:checked) .confirm-check-hint { color: #d98070; }
 
 /* "New chapters" tag on a Continue Reading card — set when a re-sync downloaded
    chapters past a caught-up read position; cleared once reading resumes. */

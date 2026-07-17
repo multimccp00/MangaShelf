@@ -248,14 +248,18 @@ function useSeriesActions(item, { onDeleted } = {}) {
 
   async function deleteCard(e) {
     if (e) e.stopPropagation();
+    // Doujinshi titles run to 100+ chars; an untruncated one turns the dialog
+    // title into a paragraph. The full name stays visible on the card behind it.
+    const shortTitle = item.title.length > 58 ? item.title.slice(0, 58).trimEnd() + "…" : item.title;
     const res = await window.confirmDialog({
-      title: `Remove “${item.title}”?`,
+      title: `Remove “${shortTitle}”?`,
       message: "Removes it from the library.",
       confirmLabel: "Remove",
       tone: "danger",
       checkboxes: [
         {
           id: "disk",
+          danger: true,
           label: "Also move the folder to the recycle bin",
           hint: "Recoverable from the bin; leave unchecked to keep the files.",
           // The default follows the "deleting also deletes files" setting, but
@@ -860,19 +864,23 @@ function ConfirmDialog({ opts, onResolve }) {
           </div>
         )}
         {opts.message && <div className="confirm-message">{opts.message}</div>}
-        {(opts.checkboxes || []).map((c) => (
-          <label key={c.id} className="confirm-check">
-            <input
-              type="checkbox"
-              checked={!!checks[c.id]}
-              onChange={(e) => setChecks((prev) => ({ ...prev, [c.id]: e.target.checked }))}
-            />
-            <span>
-              {c.label}
-              {c.hint && <span className="confirm-check-hint">{c.hint}</span>}
-            </span>
-          </label>
-        ))}
+        {hasChecks && (
+          <div className="confirm-checks">
+            {opts.checkboxes.map((c) => (
+              <label key={c.id} className={"confirm-check" + (c.danger ? " is-danger" : "")}>
+                <input
+                  type="checkbox"
+                  checked={!!checks[c.id]}
+                  onChange={(e) => setChecks((prev) => ({ ...prev, [c.id]: e.target.checked }))}
+                />
+                <span>
+                  {c.label}
+                  {c.hint && <span className="confirm-check-hint">{c.hint}</span>}
+                </span>
+              </label>
+            ))}
+          </div>
+        )}
         <div className="confirm-actions">
           <button className="confirm-btn ghost" onClick={() => resolve(false)}>
             {opts.cancelLabel || "Cancel"}
