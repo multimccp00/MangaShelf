@@ -4355,34 +4355,32 @@ textarea.detail-field-input {
      action buttons onto a second line. The coloured bubble + glyph still conveys
      the state at a glance. */
   /* Library rows: the actions (up to 5 buttons + "Open") can't share a line with
-     the name on a phone — they crushed it to "B..". So the row shows just the
-     name + path, and TAPPING it expands the actions underneath (see .expanded).
-     Only one row is expanded at a time, so the list stays scannable. */
-  .settings-lib-row {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    grid-template-areas: "dot main" ". actions";
-    align-items: center;
-    gap: 4px 9px;
-    padding: 12px 10px;
-    cursor: pointer;
-  }
-  .settings-lib-dot { grid-area: dot; }
-  .settings-lib-main { grid-area: main; }
+     the name on a phone — permanently on, they crush it to "B..". So the row
+     stays ONE line (name + path get the full width) and tapping it slides the
+     actions IN FROM THE RIGHT, over the row. One row open at a time. */
+  .settings-lib-row { padding: 12px 10px; cursor: pointer; position: relative; overflow: hidden; }
   .settings-lib-actions {
-    grid-area: actions;
-    justify-content: flex-start;
-    flex-wrap: wrap;
+    position: absolute;
+    right: 10px; top: 50%;
+    transform: translate(calc(100% + 12px), -50%);   /* parked just off the right edge */
     gap: 6px;
-    /* Collapsed by default; the row's own tap reveals it. */
-    display: none;
+    /* Its own surface: the row's text must never show through the buttons as
+       they slide over it. Rounded so it reads as a panel gliding in. */
+    padding: 5px 6px;
+    border-radius: 10px;
+    background: var(--ink-1);
+    box-shadow: -10px 0 16px -6px rgba(0, 0, 0, 0.75);
+    opacity: 0;
+    pointer-events: none;
+    transition: transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 180ms ease;
   }
   .settings-lib-row.expanded .settings-lib-actions {
-    display: flex;
-    margin-top: 10px;
-    animation: libActionsIn 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    transform: translate(0, -50%);
+    opacity: 1;
+    pointer-events: auto;
   }
-  /* A chevron marks the row as tappable and points down once it's open. */
+
+  /* A chevron marks the row as tappable; it fades as the buttons arrive. */
   .settings-lib-main { position: relative; padding-right: 18px; }
   .settings-lib-main::after {
     content: "";
@@ -4391,17 +4389,13 @@ textarea.detail-field-input {
     border-right: 1.5px solid var(--muted);
     border-bottom: 1.5px solid var(--muted);
     transform: rotate(-45deg);
-    transition: transform 180ms ease;
+    transition: opacity 160ms ease;
   }
-  .settings-lib-row.expanded .settings-lib-main::after { transform: rotate(45deg); }
-  @keyframes libActionsIn {
-    from { opacity: 0; transform: translateY(-4px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
+  .settings-lib-row.expanded .settings-lib-main::after { opacity: 0; }
   .settings-lib-badge .badge-text { display: none; }
   .settings-lib-badge { padding: 4px; width: 20px; height: 20px; justify-content: center; }
-  .settings-lib-actions .btn.sm { padding: 0 12px; font-size: 12px; height: 34px; }
-  .settings-lib-actions .icon-btn.sm { width: 34px; height: 34px; }
+  .settings-lib-actions .btn.sm { padding: 0 10px; font-size: 12px; height: 32px; }
+  .settings-lib-actions .icon-btn.sm { width: 32px; height: 32px; }
 }
 
 /* Very small phones — drop one more column where it helps. Rails stay at 3
