@@ -2188,8 +2188,13 @@ textarea {
 .rail-card-cover {
   isolation: isolate;
 }
-/* Library remove (trash) — red on hover so it reads as the destructive action. */
-.settings-lib-remove:hover { color: #e74c3c; border-color: rgba(231, 76, 60, 0.6); }
+/* Library remove (trash) — eases to red on hover so it reads as the destructive
+   action (the shared .icon-btn.sm transition carries the fade). */
+.settings-lib-actions .icon-btn.sm.settings-lib-remove:hover {
+  color: #ff6b5b;
+  border-color: rgba(231, 76, 60, 0.65);
+  background: rgba(231, 76, 60, 0.12);
+}
 
 /* Opt-in checkboxes inside the confirm dialog (e.g. "also recycle files").
    Grouped in their own inset panel so they read as OPTIONS you're choosing —
@@ -3944,14 +3949,18 @@ textarea.detail-field-input {
   pointer-events: auto;
 }
 .lib-switcher-gear:hover { background: var(--ink-2); border-color: var(--ink-4); color: white; }
-/* Touch devices: no hover, so only show the gear when it must always be shown
-   (single library — the FAB can't cycle, long-press would feel arbitrary). */
+/* Touch devices: there is no hover to reveal the gear, so it must simply BE
+   there. Hiding it left Settings reachable only by long-pressing the FAB — an
+   invisible gesture. A tap also triggers sticky :hover on touch, so visibility
+   is pinned outright rather than tied to hover state. */
 @media (hover: none) {
-  /* On touch there's no real hover — a TAP triggers sticky :hover, which used to
-     make the gear flicker/vanish when tapped. Don't tie gear visibility to hover
-     here; only ever show it when it's explicitly `.always` (gear-only mode). */
-  .lib-switcher:hover .lib-switcher-gear:not(.always) { opacity: 0; pointer-events: none; }
-  .lib-switcher-gear.always { opacity: 1 !important; transform: translateY(0) scale(1) !important; pointer-events: auto !important; }
+  .lib-switcher-gear,
+  .lib-switcher:hover .lib-switcher-gear,
+  .lib-switcher-gear.always {
+    opacity: 1 !important;
+    transform: translateY(0) scale(1) !important;
+    pointer-events: auto !important;
+  }
 }
 
 .settings-modal {
@@ -4060,8 +4069,13 @@ textarea.detail-field-input {
 .settings-lib-badge.private { background: rgba(155, 89, 182, 0.2); color: #c98fe0; }
 .settings-lib-badge.def { background: rgba(232, 198, 106, 0.18); color: var(--gold); }
 .settings-lib-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
-.settings-lib-actions .icon-btn.sm { width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--ink-3); background: var(--ink-1); color: var(--text-dim); }
-.settings-lib-actions .icon-btn.sm:hover { color: var(--text); border-color: var(--ink-4); }
+.settings-lib-actions .icon-btn.sm {
+  width: 30px; height: 30px; border-radius: 8px;
+  border: 1px solid var(--ink-3); background: var(--ink-1); color: var(--text-dim);
+  /* Without this the hover (and the trash's red) snapped on instantly. */
+  transition: color 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+.settings-lib-actions .icon-btn.sm:hover { color: var(--text); border-color: var(--ink-4); background: var(--ink-2); }
 .settings-lib-actions .icon-btn.sm.on { color: #c98fe0; border-color: rgba(155,89,182,0.5); background: rgba(155,89,182,0.14); }
 .settings-lib-actions .icon-btn.sm.spinning svg { animation: spin 700ms linear infinite; }
 .settings-add-btn { margin-top: 12px; }
@@ -4344,12 +4358,30 @@ textarea.detail-field-input {
      default) — just collapse them to ICON-ONLY so their text doesn't push the
      action buttons onto a second line. The coloured bubble + glyph still conveys
      the state at a glance. */
-  .settings-lib-row { gap: 9px; padding: 10px; }
+  /* Library rows: the actions (up to 5 buttons + "Open") can't share a line with
+     the name on a phone — they crushed it to "B..". Stack instead: dot + name +
+     path on top, the full action row underneath at comfortable tap size. */
+  .settings-lib-row {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    grid-template-areas: "dot main" ". actions";
+    align-items: center;
+    gap: 4px 9px;
+    padding: 12px 10px;
+  }
+  .settings-lib-dot { grid-area: dot; }
+  .settings-lib-main { grid-area: main; }
+  .settings-lib-actions {
+    grid-area: actions;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
   .settings-lib-badge .badge-text { display: none; }
   .settings-lib-badge { padding: 4px; width: 20px; height: 20px; justify-content: center; }
-  .settings-lib-actions { gap: 4px; }
-  .settings-lib-actions .btn.sm { padding: 0 9px; font-size: 11px; }
-  .settings-lib-actions .icon-btn.sm { width: 32px; height: 32px; }
+  .settings-lib-actions .btn.sm { padding: 0 12px; font-size: 12px; height: 34px; }
+  .settings-lib-actions .icon-btn.sm { width: 34px; height: 34px; }
 }
 
 /* Very small phones — drop one more column where it helps. Rails stay at 3
