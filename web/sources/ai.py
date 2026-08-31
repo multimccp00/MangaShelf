@@ -141,33 +141,48 @@ def _llm_json(system: str, user: str, max_tokens: int = 800) -> dict:
     return json.loads(m.group(0))
 
 
-# --- headless browser (shared, lazy) ----------------------------------------
+# --- headless browser (per-thread, lazy) ------------------------------------
+# Playwright's sync API is THREAD-AFFINE: a browser started on one thread cannot
+# be driven from another — it raises "cannot switch to a different thread". The
+# server renders from more than one thread (FastAPI's threadpool serves preview,
+# a background worker runs the import job), so a single shared browser worked for
+# whichever thread got there first and broke the import for the next one.
+# Each thread therefore gets its own browser, reused for every page IT renders.
 _PW_LOCK = threading.Lock()
-_PW = {"pw": None, "browser": None}
+_PW_LOCAL = threading.local()
+_PW_ALL: list = []   # every (playwright, browser) started, for shutdown
 
 
 def _browser():
-    if _PW["browser"] is None:
+    br = getattr(_PW_LOCAL, "browser", None)
+    if br is None:
         from playwright.sync_api import sync_playwright
-        _PW["pw"] = sync_playwright().start()
-        _PW["browser"] = _PW["pw"].chromium.launch()
-    return _PW["browser"]
+        pw = sync_playwright().start()
+        br = pw.chromium.launch()
+        _PW_LOCAL.pw, _PW_LOCAL.browser = pw, br
+        with _PW_LOCK:
+            _PW_ALL.append((pw, br))
+    return br
 
 
 def _shutdown_browser() -> None:
-    """Close the shared Chromium + Playwright on process exit so it isn't orphaned."""
+    """Close every thread's Chromium + Playwright on process exit.
+    ponytail: atexit runs on the main thread, so closing another thread's browser
+    hits the same thread affinity and is swallowed — those Chromium children are
+    reaped when the process exits anyway. Give each worker its own explicit
+    shutdown if orphaned browsers ever show up in practice."""
     with _PW_LOCK:
+        entries = list(_PW_ALL)
+        _PW_ALL.clear()
+    for pw, br in entries:
         try:
-            if _PW["browser"] is not None:
-                _PW["browser"].close()
+            br.close()
         except Exception:
             pass
         try:
-            if _PW["pw"] is not None:
-                _PW["pw"].stop()
+            pw.stop()
         except Exception:
             pass
-        _PW["browser"] = _PW["pw"] = None
 
 
 import atexit  # noqa: E402
