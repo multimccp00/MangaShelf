@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import re
 import socket
 import threading
@@ -63,6 +64,27 @@ def _is_public_url(url: str) -> bool:
 
 
 # --- local LLM (OpenAI-compatible) ------------------------------------------
+def _pick_model(chat: list[str]) -> str:
+    """Choose which loaded model to use. MANGASHELF_LLM_MODEL wins if it matches
+    one (exact id, or a prefix so "qwen2.5-coder" finds "qwen2.5-coder:7b").
+    Without it, prefer a coder/instruct model — this job is regex writing, and a
+    vision model like llava happening to sort first produces garbage rules."""
+    want = (os.environ.get("MANGASHELF_LLM_MODEL") or "").strip().lower()
+    if want:
+        for m in chat:
+            if m.lower() == want:
+                return m
+        for m in chat:
+            if m.lower().startswith(want):
+                return m
+        print(f"[sources] MANGASHELF_LLM_MODEL={want!r} not loaded; auto-picking instead")
+    for kw in ("coder", "code", "instruct"):
+        for m in chat:
+            if kw in m.lower():
+                return m
+    return chat[0]
+
+
 def _discover_llm() -> tuple[str | None, str | None]:
     global _llm_base, _llm_model, _llm_checked_at
     now = time.monotonic()
@@ -81,7 +103,7 @@ def _discover_llm() -> tuple[str | None, str | None]:
             # Prefer a coder/instruct chat model over embedding models.
             chat = [m for m in models if "embed" not in m.lower()]
             if chat:
-                _llm_base, _llm_model = base, chat[0]
+                _llm_base, _llm_model = base, _pick_model(chat)
                 return _llm_base, _llm_model
         except Exception:
             continue
@@ -168,8 +190,12 @@ def _render(url: str, scroll: bool = False) -> dict:
                 page.mouse.wheel(0, 2400)
                 page.wait_for_timeout(250)
             page.wait_for_timeout(800)
+        # Cap high enough for a long-running series' full chapter list plus the
+        # site's nav/footer links — at 400 a 439-chapter series silently lost its
+        # first 60 chapters. Only a 6000-char SAMPLE is sent to the LLM; the full
+        # list is what the learned regex is matched against.
         links = page.eval_on_selector_all(
-            "a[href]", "els => els.slice(0,400).map(e => [e.getAttribute('href'), (e.textContent||'').trim().slice(0,60)])")
+            "a[href]", "els => els.slice(0,3000).map(e => [e.getAttribute('href'), (e.textContent||'').trim().slice(0,60)])")
         # Read src plus common lazy attributes so nothing is missed.
         imgs = page.eval_on_selector_all(
             "img",
@@ -226,6 +252,35 @@ def _dominant_image_host(imgs: list[str]) -> str | None:
     return host if n >= 3 else None   # a real run of pages, not a stray icon
 
 
+def _norm_url(u: str) -> str:
+    """Percent-encode a URL so the same image written two ways collapses to one
+    string. Pages are commonly listed BOTH raw and escaped (".../Rent a Girlfriend/"
+    and ".../Rent%20a%20Girlfriend/"); without this they de-dupe as two pages and
+    every image downloads twice. '%' is in `safe`, so existing escapes survive."""
+    from urllib.parse import quote
+    return quote(u, safe=":/?#[]@!$&'()*+,;=%~")
+
+
+def _image_rule_problem(rx: str, imgs: list[str], title: str) -> str | None:
+    """Why `rx` is unusable as a cached image rule, or None if it looks sound.
+    The rule is cached PER DOMAIN and reused for every series on the site, so it
+    has to both match this chapter's images and be free of this series' name."""
+    try:
+        irx = re.compile(rx)
+    except re.error as exc:
+        return f"it is not a valid Python regex ({exc})"
+    if sum(1 for u in imgs if irx.search(u)) < 3:
+        return "it matched almost none of the image URLs listed"
+    # A regex carrying the series name only ever works for THIS series — the
+    # observed failure was "/images/Rent%20a%20Girlfriend/...", which fetches zero
+    # pages for every other series on the same site.
+    flat = re.sub(r"[^A-Za-z0-9]+", "", rx).lower()
+    for word in re.split(r"[^A-Za-z0-9]+", title or ""):
+        if len(word) >= 3 and word.lower() in flat:
+            return f"it hard-codes the series name ({word!r}) — wildcard that path segment instead"
+    return None
+
+
 def _page_num(u: str) -> int:
     m = _NUMBERED_RE.search(u)
     return int(m.group(1)) if m else 0
@@ -250,6 +305,40 @@ class GenericAISource(MangaSource):
         ref = getattr(self, "_referer", "")
         return {"Referer": ref} if ref else {}
 
+    def _ask_chapter_regex(self, url: str, rendered: dict, retry: bool = False) -> dict:
+        link_lines = "\n".join(f"{h} | {t}" for h, t in rendered["links"] if h)[:6000]
+        extra = ("\nYour previous answer matched NONE of the hrefs above. The usual "
+                 "cause is DELETING the series slug instead of replacing it with a "
+                 "wildcard. Check your pattern against the list before answering.\n"
+                 if retry else "")
+        return _llm_json(
+            "You extract manga chapter lists from a web page. Reply with ONLY a JSON object.",
+            f"Series page URL: {url}\nPage title: {rendered['title']}\n\n"
+            f"Links on the page (href | text):\n{link_lines}\n{extra}\n"
+            "Return JSON with:\n"
+            '  "title": the series title (string),\n'
+            '  "chapter_regex": a Python regex that MATCHES the chapter hrefs listed '
+            "above. It is reused for other series on this site, so replace this series' "
+            "name/slug with a wildcard (e.g. [^/]*) — do NOT simply delete it, or the "
+            "pattern stops matching. Exclude nav/login/social/other-series links.",
+        )
+
+    def _collect(self, url: str, rendered: dict, rx: str) -> list[tuple[float, str, str]]:
+        """Chapter links matching `rx`, de-duped, as (number, absolute_url, text).
+        Raises re.error if `rx` is not a valid pattern."""
+        crx = re.compile(rx)
+        seen, out = set(), []
+        for href, text in rendered["links"]:
+            if not href or not crx.search(href):
+                continue
+            full = _abs(url, href)
+            if full in seen:
+                continue
+            seen.add(full)
+            numm = re.search(r"(\d+(?:\.\d+)?)", text) or re.search(r"(\d+(?:\.\d+)?)", href)
+            out.append((float(numm.group(1)) if numm else 0.0, full, text.strip()))
+        return out
+
     def fetch_series(self, url: str) -> SeriesMeta:
         domain = urlparse(url).netloc
         # Remember the origin so image_headers() can send a matching Referer when
@@ -262,38 +351,32 @@ class GenericAISource(MangaSource):
         title = rendered["h1"] or rendered["title"] or "Untitled"
 
         # 1) Chapter-link rule (domain-stable → cached across all series on the site).
-        if "chapter_regex" not in rules:
-            link_lines = "\n".join(f"{h} | {t}" for h, t in rendered["links"] if h)[:6000]
-            ans = _llm_json(
-                "You extract manga chapter lists from a web page. Reply with ONLY a JSON object.",
-                f"Series page URL: {url}\nPage title: {rendered['title']}\n\n"
-                f"Links on the page (href | text):\n{link_lines}\n\n"
-                "Return JSON with:\n"
-                '  "title": the series title (string),\n'
-                '  "chapter_regex": a Python regex matching the chapter-page hrefs. It must '
-                "work for ANY series on this site, so do NOT include this series' name or slug "
-                "— capture only the structural pattern (e.g. a '/chapter/' path with a number). "
-                "Exclude nav/login/social/other-series links.",
-            )
-            if ans.get("title"):
-                title = ans["title"]   # the LLM's cleaner title for THIS series
-            rules["chapter_regex"] = ans.get("chapter_regex", "")
+        # A rule is only accepted if it actually MATCHES links on this page: an LLM
+        # readily returns a plausible-looking regex that matches nothing (e.g. it
+        # deletes the series slug from the middle of the path instead of wildcarding
+        # it), and caching that would break the whole domain permanently.
+        chapters: list[tuple[float, str, str]] = []
+        if rules.get("chapter_regex"):
+            try:
+                chapters = self._collect(url, rendered, rules["chapter_regex"])
+            except re.error:
+                chapters = []
+            if not chapters:
+                rules.pop("chapter_regex", None)   # stale/wrong — re-learn below
 
-        try:
-            crx = re.compile(rules["chapter_regex"])
-        except re.error:
-            raise ValueError("The AI produced an invalid chapter pattern for this site.")
+        if not chapters:
+            for attempt in range(2):   # one retry, told what went wrong
+                ans = self._ask_chapter_regex(url, rendered, retry=attempt > 0)
+                if ans.get("title"):
+                    title = ans["title"]   # the LLM's cleaner title for THIS series
+                try:
+                    chapters = self._collect(url, rendered, ans.get("chapter_regex", ""))
+                except re.error:
+                    continue               # invalid pattern — retry
+                if chapters:
+                    rules["chapter_regex"] = ans["chapter_regex"]
+                    break
 
-        seen, chapters = set(), []
-        for href, text in rendered["links"]:
-            if not href or not crx.search(href):
-                continue
-            full = _abs(url, href)
-            if full in seen:
-                continue
-            seen.add(full)
-            numm = re.search(r"(\d+(?:\.\d+)?)", text) or re.search(r"(\d+(?:\.\d+)?)", href)
-            chapters.append((float(numm.group(1)) if numm else 0.0, full, text.strip()))
         # Chapter lists are usually newest-first on the page → sort ascending by number.
         chapters.sort(key=lambda c: c[0])
         chapter_metas = [ChapterMeta(id=full, number=(str(int(n)) if n == int(n) else str(n)) if n else "",
@@ -311,21 +394,40 @@ class GenericAISource(MangaSource):
                 rules["image_host"] = host
             else:
                 img_lines = "\n".join(sample["imgs"])[:6000]
-                ans = _llm_json(
-                    "You identify the real page images of an online manga chapter. Reply with ONLY JSON.",
-                    f"Chapter page URL: {chapter_metas[0].id}\n\n"
-                    f"Image URLs on the page:\n{img_lines}\n\n"
-                    'Return JSON {"image_regex": <regex>} matching the manga page images. It '
-                    "must work for EVERY chapter — match only the stable CDN host + filename "
-                    "pattern; never hard-code chapter-specific ids/dates/uuids. Exclude logos, "
-                    "ads, avatars, thumbnails, icons.",
-                )
-                rx = ans.get("image_regex", "")
-                try:
-                    re.compile(rx)
-                except re.error:
-                    raise ValueError("The AI produced an invalid image pattern for this site.")
-                rules["image_regex"] = rx
+                # Same validate-then-cache loop as the chapter rule: an unchecked
+                # regex here is worse than useless, because it's cached per DOMAIN
+                # and a series-specific one breaks every other series on the site.
+                usable, fallback = "", ""
+                problem = ""
+                for _attempt in range(2):
+                    ans = _llm_json(
+                        "You identify the real page images of an online manga chapter. Reply with ONLY JSON.",
+                        f"Chapter page URL: {chapter_metas[0].id}\n"
+                        f"Series title: {title}\n\n"
+                        f"Image URLs on the page:\n{img_lines}\n\n"
+                        + (f"Your previous answer was rejected because {problem}.\n\n" if problem else "")
+                        + 'Return JSON {"image_regex": <regex>} matching the manga page images. It '
+                        "must work for EVERY chapter AND every series on this site — match only the "
+                        "stable CDN host + filename pattern; never hard-code chapter-specific "
+                        "ids/dates/uuids or the series name (wildcard those path segments, e.g. "
+                        "[^/]*). Exclude logos, ads, avatars, thumbnails, icons.",
+                    )
+                    rx = ans.get("image_regex", "")
+                    problem = _image_rule_problem(rx, sample["imgs"], title) or ""
+                    if not problem:
+                        usable = rx
+                        break
+                    # A rule that matches but names the series still reads THIS
+                    # series correctly — keep it as a last resort over nothing.
+                    if rx and "hard-codes" in problem and not fallback:
+                        fallback = rx
+                if not usable and fallback:
+                    print(f"[sources] {domain}: caching a series-specific image rule; "
+                          "other series on this site may need a re-import")
+                    usable = fallback
+                if not usable:
+                    raise ValueError("The AI couldn't work out how to find this site's page images.")
+                rules["image_regex"] = usable
 
         _save_rules(domain, rules)
         slug = re.sub(r"[^a-z0-9]+", "-", (urlparse(url).path or domain).lower()).strip("-") or domain
@@ -345,7 +447,7 @@ class GenericAISource(MangaSource):
             sel = [u for u in imgs if irx.search(u)]
         else:
             return []
-        sel = list(dict.fromkeys(_abs(chapter.id, u) for u in sel))
+        sel = list(dict.fromkeys(_norm_url(_abs(chapter.id, u)) for u in sel))
         return sorted(sel, key=_page_num)
 
     def url_for(self, external_id: str) -> str:

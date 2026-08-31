@@ -14,11 +14,20 @@ function Test-Up {
     } catch { $false }
 }
 
+# Local LLM for the AI import fallback (sources/ai.py probes localhost:11434).
+# Optional: if Ollama isn't installed, the AI source just stays unavailable.
+$ollama = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+if ((Test-Path $ollama) -and -not (Get-Process ollama -ErrorAction SilentlyContinue)) {
+    Start-Process $ollama "serve" -WindowStyle Hidden
+}
+
 if (-not (Test-Up)) {
     # Loopback ONLY: the LAN can't reach the server at all. Phone access flows
     # exclusively through the `tailscale serve` HTTPS proxy, which forwards
     # tailnet traffic to 127.0.0.1 — so Tailscale is the single way in.
     $env:MANGASHELF_HOST = "127.0.0.1"
+    # Which local model the AI import fallback uses (see sources/ai.py:_pick_model).
+    if (-not $env:MANGASHELF_LLM_MODEL) { $env:MANGASHELF_LLM_MODEL = "qwen2.5-coder" }
     Start-Process -FilePath (Join-Path $root ".venv\Scripts\python.exe") `
         -ArgumentList ('"' + (Join-Path $root "web\server.py") + '"') `
         -WorkingDirectory $root -WindowStyle Hidden
