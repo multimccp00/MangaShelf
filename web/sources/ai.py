@@ -448,7 +448,15 @@ class GenericAISource(MangaSource):
         else:
             return []
         sel = list(dict.fromkeys(_norm_url(_abs(chapter.id, u)) for u in sel))
-        return sorted(sel, key=_page_num)
+        # `sel` is already in DOM order, which IS the reading order on every site
+        # that lays pages out top-to-bottom. Only re-sort when the filenames are
+        # genuinely numbered (…/1.jpg, …/2.jpg) and can be trusted to say more
+        # than the DOM does — sorting on a number that isn't there gave every URL
+        # a key of 0, so a site mixing numbered and token filenames (…/aX9f.jpg)
+        # would float the unnumbered pages to the front.
+        if sel and all(_NUMBERED_RE.search(u) for u in sel):
+            return sorted(sel, key=_page_num)
+        return sel
 
     def url_for(self, external_id: str) -> str:
         # external_id is "<domain><path>"
