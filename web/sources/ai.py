@@ -268,10 +268,21 @@ def _abs(base_url: str, href: str) -> str:
 # across chapters even when the middle of the path changes.
 _NUMBERED_RE = re.compile(r"/(\d+)\.(?:jpe?g|png|webp|gif)(?:[?#]|$)", re.I)
 
+# Any image file, however it is named. Sites do NOT stick to one format: a single
+# chapter here served 19 pages as .png and 3 as .jpg, so a rule pinned to one
+# extension silently dropped most of the chapter.
+_IMAGE_RE = re.compile(r"\.(?:jpe?g|png|webp|gif)(?:[?#]|$)", re.I)
+
 
 def _dominant_image_host(imgs: list[str]) -> str | None:
+    """The CDN host serving this chapter's pages, or None if no host stands out.
+
+    Deliberately does NOT require numbered filenames — plenty of sites use random
+    tokens (…/aX9f1756213643.jpg). What identifies the page host is simply that
+    most of the images on a chapter page come from it, while logos, avatars and
+    ko-fi buttons are one-offs from elsewhere."""
     from collections import Counter
-    hosts = [urlparse(u).netloc for u in imgs if _NUMBERED_RE.search(u)]
+    hosts = [urlparse(u).netloc for u in imgs if _IMAGE_RE.search(u)]
     if not hosts:
         return None
     host, n = Counter(hosts).most_common(1)[0]
@@ -285,6 +296,24 @@ def _norm_url(u: str) -> str:
     every image downloads twice. '%' is in `safe`, so existing escapes survive."""
     from urllib.parse import quote
     return quote(u, safe=":/?#[]@!$&'()*+,;=%~")
+
+
+# A link that clearly points at a chapter: the word "chapter" followed by a
+# number. Used only to notice what a learned regex MISSES — a rule can match
+# hundreds of chapters and still quietly drop every fractional one.
+_CHAPTERISH_RE = re.compile(r"chapter[-_/]?\d", re.I)
+
+
+def _missed_chapter_links(rx: str, links: list) -> list[str]:
+    """Chapter-looking hrefs that `rx` does NOT match. On this site the learned
+    rule ended in (\\d+)/ while fractional chapters are ".../chapter-32-5/", so 18
+    chapters were skipped with no error anywhere."""
+    try:
+        crx = re.compile(rx)
+    except re.error:
+        return []
+    return [h for h, _t in links
+            if h and _CHAPTERISH_RE.search(h) and not crx.search(h)]
 
 
 def _image_rule_problem(rx: str, imgs: list[str], title: str) -> str | None:
@@ -331,12 +360,9 @@ class GenericAISource(MangaSource):
         ref = getattr(self, "_referer", "")
         return {"Referer": ref} if ref else {}
 
-    def _ask_chapter_regex(self, url: str, rendered: dict, retry: bool = False) -> dict:
+    def _ask_chapter_regex(self, url: str, rendered: dict, problem: str = "") -> dict:
         link_lines = "\n".join(f"{h} | {t}" for h, t in rendered["links"] if h)[:6000]
-        extra = ("\nYour previous answer matched NONE of the hrefs above. The usual "
-                 "cause is DELETING the series slug instead of replacing it with a "
-                 "wildcard. Check your pattern against the list before answering.\n"
-                 if retry else "")
+        extra = f"\nYour previous answer was rejected because {problem}\n" if problem else ""
         return _llm_json(
             "You extract manga chapter lists from a web page. Reply with ONLY a JSON object.",
             f"Series page URL: {url}\nPage title: {rendered['title']}\n\n"
@@ -346,7 +372,8 @@ class GenericAISource(MangaSource):
             '  "chapter_regex": a Python regex that MATCHES the chapter hrefs listed '
             "above. It is reused for other series on this site, so replace this series' "
             "name/slug with a wildcard (e.g. [^/]*) — do NOT simply delete it, or the "
-            "pattern stops matching. Exclude nav/login/social/other-series links.",
+            "pattern stops matching. Match fractional chapters too (…/chapter-32-5/ is "
+            "chapter 32.5). Exclude nav/login/social/other-series links.",
         )
 
     def _collect(self, url: str, rendered: dict, rx: str) -> list[tuple[float, str, str]]:
@@ -361,8 +388,18 @@ class GenericAISource(MangaSource):
             if full in seen:
                 continue
             seen.add(full)
-            numm = re.search(r"(\d+(?:\.\d+)?)", text) or re.search(r"(\d+(?:\.\d+)?)", href)
-            out.append((float(numm.group(1)) if numm else 0.0, full, text.strip()))
+            numm = re.search(r"(\d+(?:\.\d+)?)", text)
+            if numm:
+                num = float(numm.group(1))
+            else:
+                # Fall back to the href, where a fractional chapter is usually
+                # written with a separator rather than a point: chapter-32-5 = 32.5.
+                hm = re.search(r"chapter[-_/]?(\d+)(?:[-_.](\d+))?", href, re.I)
+                if hm:
+                    num = float(f"{hm.group(1)}.{hm.group(2)}") if hm.group(2) else float(hm.group(1))
+                else:
+                    num = 0.0
+            out.append((num, full, text.strip()))
         return out
 
     def fetch_series(self, url: str) -> SeriesMeta:
@@ -381,27 +418,63 @@ class GenericAISource(MangaSource):
         # readily returns a plausible-looking regex that matches nothing (e.g. it
         # deletes the series slug from the middle of the path instead of wildcarding
         # it), and caching that would break the whole domain permanently.
+        # A rule must match links on THIS page and must not skip any chapter-looking
+        # link. Matching *something* is not enough: the first learned rule here
+        # matched 449 chapters and silently dropped 18 fractional ones, which shows
+        # up much later as a series with holes in it.
+        def _judge(rx: str) -> tuple[list, str]:
+            """(chapters, reason it is unusable) for a candidate regex."""
+            try:
+                found = self._collect(url, rendered, rx)
+            except re.error as exc:
+                return [], f"it is not a valid Python regex ({exc})."
+            if not found:
+                return [], ("it matched none of the hrefs — the usual cause is DELETING "
+                            "the series slug instead of replacing it with a wildcard.")
+            missed = _missed_chapter_links(rx, rendered["links"])
+            if missed:
+                sample = ", ".join(missed[:5])
+                return found, (f"it skipped {len(missed)} chapter links, e.g. {sample} — "
+                               "fractional chapters use a separator, not a decimal point.")
+            return found, ""
+
         chapters: list[tuple[float, str, str]] = []
         if rules.get("chapter_regex"):
-            try:
-                chapters = self._collect(url, rendered, rules["chapter_regex"])
-            except re.error:
+            chapters, why = _judge(rules["chapter_regex"])
+            if why:
+                # Cached rules are reused for every series on the domain, so a rule
+                # with a known flaw is re-learned rather than quietly reapplied.
+                print(f"[sources] {domain}: relearning chapter rule — {why}")
+                rules.pop("chapter_regex", None)
                 chapters = []
-            if not chapters:
-                rules.pop("chapter_regex", None)   # stale/wrong — re-learn below
+
+        # Try a plain heuristic before the LLM: on essentially every manga site a
+        # chapter link is the word "chapter" followed by a number. It costs nothing,
+        # is deterministic, and beat the model here — it catches the fractional
+        # chapters the LLM's regex kept dropping, with no false positives. The LLM
+        # is only needed for sites that name their chapter URLs some other way.
+        if not chapters:
+            found, why = _judge(_CHAPTERISH_RE.pattern)
+            if found and not why:
+                chapters, rules["chapter_regex"] = found, _CHAPTERISH_RE.pattern
 
         if not chapters:
-            for attempt in range(2):   # one retry, told what went wrong
-                ans = self._ask_chapter_regex(url, rendered, retry=attempt > 0)
+            best, best_rx, why = [], "", ""
+            for _attempt in range(3):
+                ans = self._ask_chapter_regex(url, rendered, why)
                 if ans.get("title"):
                     title = ans["title"]   # the LLM's cleaner title for THIS series
-                try:
-                    chapters = self._collect(url, rendered, ans.get("chapter_regex", ""))
-                except re.error:
-                    continue               # invalid pattern — retry
-                if chapters:
-                    rules["chapter_regex"] = ans["chapter_regex"]
+                rx = ans.get("chapter_regex", "")
+                found, why = _judge(rx)
+                if found and not why:
+                    best, best_rx = found, rx
                     break
+                if len(found) > len(best):   # keep the least-bad answer so far
+                    best, best_rx = found, rx
+            if best:
+                chapters, rules["chapter_regex"] = best, best_rx
+                if why:
+                    print(f"[sources] {domain}: best chapter rule still imperfect — {why}")
 
         # Chapter lists are usually newest-first on the page → sort ascending by number.
         chapters.sort(key=lambda c: c[0])
@@ -467,7 +540,7 @@ class GenericAISource(MangaSource):
         imgs = rendered["imgs"]
         host = rules.get("image_host")
         if host:
-            sel = [u for u in imgs if urlparse(u).netloc == host and _NUMBERED_RE.search(u)]
+            sel = [u for u in imgs if urlparse(u).netloc == host and _IMAGE_RE.search(u)]
         elif rules.get("image_regex"):
             irx = re.compile(rules["image_regex"])
             sel = [u for u in imgs if irx.search(u)]
