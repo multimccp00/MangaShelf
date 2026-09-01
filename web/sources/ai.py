@@ -34,6 +34,10 @@ _CACHE_DIR = Path(__file__).parent / "_ai_cache"
 
 # OpenAI-compatible endpoints to probe, in order (LM Studio, then Ollama).
 _LLM_ENDPOINTS = ["http://localhost:1234/v1", "http://localhost:11434/v1"]
+# Ollama answers /v1/models in ~2.0s once it holds a few models, so the old 2s
+# budget lost a coin flip on every probe — the AI source appeared and vanished
+# between requests, showing up as "No import source recognizes this link".
+_LLM_PROBE_SECS = 8
 _llm_base: str | None = None
 _llm_model: str | None = None
 _llm_checked_at = 0.0            # monotonic time of the last probe (0 = never)
@@ -94,10 +98,17 @@ def _discover_llm() -> tuple[str | None, str | None]:
     if _llm_base is None and _llm_checked_at and (now - _llm_checked_at) < _LLM_RECHECK_SECS:
         return None, None
     _llm_checked_at = now
-    for base in _LLM_ENDPOINTS:
+    # Re-probe the endpoint that worked last time FIRST. Probing an endpoint with
+    # nothing listening costs the full timeout twice ("localhost" resolves to both
+    # ::1 and 127.0.0.1), so checking an absent LM Studio ahead of a live Ollama
+    # would add that dead wait to a request that is about to succeed anyway.
+    endpoints = _LLM_ENDPOINTS
+    if _llm_base in endpoints:
+        endpoints = [_llm_base] + [b for b in endpoints if b != _llm_base]
+    for base in endpoints:
         try:
             req = urllib.request.Request(base + "/models")
-            with urllib.request.urlopen(req, timeout=2) as r:
+            with urllib.request.urlopen(req, timeout=_LLM_PROBE_SECS) as r:
                 data = json.loads(r.read())
             models = [m["id"] for m in data.get("data", [])]
             # Prefer a coder/instruct chat model over embedding models.
