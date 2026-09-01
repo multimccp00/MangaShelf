@@ -211,11 +211,25 @@ def _render(url: str, scroll: bool = False) -> dict:
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(2000)
         if scroll:
-            # Step down the page so lazy-loaders fire, then back to top.
+            # Step down the page so lazy-loaders fire, stopping as soon as no new
+            # image URLs appear. The scroll used to be a flat 24 steps — ~6s spent
+            # per chapter whether or not the site lazy-loads at all. Sites that put
+            # every page URL in the DOM up front (most of them) now exit after two
+            # rounds; genuinely lazy ones still get the full budget.
+            count_js = ("Array.from(document.images).flatMap(e => [e.currentSrc, "
+                        "e.getAttribute('src'), e.getAttribute('data-src'), "
+                        "e.getAttribute('data-original'), e.getAttribute('data-lazy-src')])"
+                        ".filter(Boolean).length")
+            stable, last = 0, -1
             for _ in range(24):
+                found = page.evaluate(count_js)
+                stable = stable + 1 if found == last else 0
+                last = found
+                if stable >= 2:
+                    break
                 page.mouse.wheel(0, 2400)
                 page.wait_for_timeout(250)
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(400)
         # Cap high enough for a long-running series' full chapter list plus the
         # site's nav/footer links — at 400 a 439-chapter series silently lost its
         # first 60 chapters. Only a 6000-char SAMPLE is sent to the LLM; the full
