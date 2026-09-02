@@ -17,6 +17,13 @@ import urllib.request
 from .base import ChapterMeta, MangaSource, SearchResult, SeriesMeta
 
 _API = "https://api.mangadex.org"
+
+# MangaDex filters every search and feed to safe/suggestive/erotica unless the
+# request names the ratings itself. Omitting them is not "no filter": an adult
+# title then resolves its metadata normally (fetched by id, unfiltered) while its
+# chapter feed comes back empty, so the import offers "0 chapters" with no error.
+_RATINGS = ("safe", "suggestive", "erotica", "pornographic")
+_RATING_QS = "&".join(f"contentRating[]={r}" for r in _RATINGS)
 _UPLOADS = "https://uploads.mangadex.org"
 _UUID_RE = re.compile(r"/title/([0-9a-fA-F-]{36})")
 _UA = "MangaShelf/1.0 (+https://github.com/; self-hosted personal library)"
@@ -141,9 +148,8 @@ class MangaDexSource(MangaSource):
         qs = urllib.parse.urlencode(
             [("title", title), ("limit", min(int(limit), 50)),
              ("includes[]", "author"), ("includes[]", "cover_art"),
-             ("order[relevance]", "desc"),
-             ("contentRating[]", "safe"), ("contentRating[]", "suggestive"),
-             ("contentRating[]", "erotica")],
+             ("order[relevance]", "desc")]
+            + [("contentRating[]", r) for r in _RATINGS],
         )
         try:
             j = _get(f"{_API}/manga?{qs}")
@@ -192,11 +198,11 @@ class MangaDexSource(MangaSource):
         mid = m.group(1)
         try:
             qs = urllib.parse.urlencode({"translatedLanguage[]": "en", "limit": 1})
-            total = _get(f"{_API}/manga/{mid}/feed?{qs}").get("total", 0)
+            total = _get(f"{_API}/manga/{mid}/feed?{qs}&{_RATING_QS}").get("total", 0)
             if total:
                 return int(total)
             # No English → total across every language, one request.
-            return int(_get(f"{_API}/manga/{mid}/feed?limit=1").get("total", 0))
+            return int(_get(f"{_API}/manga/{mid}/feed?limit=1&{_RATING_QS}").get("total", 0))
         except Exception:
             return -1
 
@@ -271,7 +277,7 @@ class MangaDexSource(MangaSource):
                     "offset": offset,
                 },
             )
-            j = _get(f"{_API}/manga/{mid}/feed?{qs}")
+            j = _get(f"{_API}/manga/{mid}/feed?{qs}&{_RATING_QS}")
             for c in j.get("data", []):
                 a = c.get("attributes", {})
                 if a.get("externalUrl"):
@@ -313,7 +319,7 @@ class MangaDexSource(MangaSource):
         for L in langs:
             try:
                 qs = urllib.parse.urlencode({"translatedLanguage[]": L, "limit": 1})
-                total = _get(f"{_API}/manga/{mid}/feed?{qs}").get("total", 0)
+                total = _get(f"{_API}/manga/{mid}/feed?{qs}&{_RATING_QS}").get("total", 0)
             except Exception:
                 total = 0
             if total > best_n:
