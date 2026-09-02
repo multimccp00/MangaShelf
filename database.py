@@ -68,7 +68,12 @@ class Database:
             date_added DATETIME DEFAULT CURRENT_TIMESTAMP,
             last_read DATETIME,
             last_chapter TEXT,
-            last_page INTEGER DEFAULT 0
+            last_page INTEGER DEFAULT 0,
+            -- last_page is a BOOKMARK: it moves backwards on a re-read. These two
+            -- are the history that bookmark can't hold — lifetime pages read (only
+            -- ever grows) and how many times the series has been finished.
+            pages_read_total INTEGER DEFAULT 0,
+            times_completed INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS genres (
@@ -172,6 +177,18 @@ class Database:
             changed = True
         if "last_page" not in columns:
             self.conn.execute("ALTER TABLE series ADD COLUMN last_page INTEGER DEFAULT 0")
+            changed = True
+        if "pages_read_total" not in columns:
+            self.conn.execute("ALTER TABLE series ADD COLUMN pages_read_total INTEGER DEFAULT 0")
+            # Seed from the existing bookmark so an established library doesn't
+            # start from zero: whatever has been read up to now is at least
+            # last_page. Only ever an undercount, never a phantom.
+            self.conn.execute("UPDATE series SET pages_read_total = COALESCE(last_page, 0)")
+            changed = True
+        if "times_completed" not in columns:
+            self.conn.execute("ALTER TABLE series ADD COLUMN times_completed INTEGER DEFAULT 0")
+            # Series already marked Completed by hand count as one finish.
+            self.conn.execute("UPDATE series SET times_completed = 1 WHERE status = 'Completed'")
             changed = True
         if "nhentai_id" in columns and "external_id" not in columns:
             # Legacy column rename: preserve any existing values.
@@ -388,8 +405,28 @@ class Database:
         self.conn.execute("UPDATE series SET status = ? WHERE id = ?", (status, series_id))
         self.conn.commit()
 
-    def update_last_read_progress(self, series_id: int, chapter_name: str, page_number: int) -> None:
+    def update_last_read_progress(self, series_id: int, chapter_name: str, page_number: int,
+                                  total_pages: int = 0) -> None:
+        """Save the reading position, and fold it into the lifetime counters.
+
+        `total_pages` (0 = unknown) is what lets a finish be detected; the caller
+        has it cached, this layer doesn't."""
         page_number = max(1, int(page_number))
+        row = self.conn.execute(
+            "SELECT last_page, status FROM series WHERE id = ?", (series_id,)
+        ).fetchone()
+        old_page = int((row["last_page"] if row else 0) or 0)
+
+        # Lifetime pages count FORWARD movement only, never subtracting. A re-read
+        # sends last_page back to 1, so a plain "total = last_page" would make the
+        # figure (and the time estimate on top of it) shrink as the user re-read.
+        gained = max(0, page_number - old_page)
+
+        # Crossing the final page completes a pass. Guarded on old_page, so resting
+        # on the last page and saving again doesn't score finish after finish.
+        total_pages = int(total_pages or 0)
+        finished = 1 if (total_pages and old_page < total_pages <= page_number) else 0
+
         # Any progress save means the reader is back in this series, so the
         # "new chapters arrived while you were caught up" highlight is served.
         self.conn.execute(
@@ -398,10 +435,13 @@ class Database:
             SET last_read = CURRENT_TIMESTAMP,
                 last_chapter = ?,
                 last_page = ?,
-                fresh_chapters = 0
+                fresh_chapters = 0,
+                pages_read_total = COALESCE(pages_read_total, 0) + ?,
+                times_completed = COALESCE(times_completed, 0) + ?,
+                status = CASE WHEN ? = 1 THEN 'Completed' ELSE status END
             WHERE id = ?
             """,
-            (chapter_name, page_number, series_id),
+            (chapter_name, page_number, gained, finished, finished, series_id),
         )
         self.conn.commit()
 

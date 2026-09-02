@@ -1140,7 +1140,12 @@ def save_progress(series_id: int, body: ProgressIn) -> dict[str, Any]:
     data = _db.get_series_by_id(series_id)
     if not data:
         raise HTTPException(status_code=404, detail="Series not found")
-    _db.update_last_read_progress(series_id, body.chapter_name, body.page)
+    # The cached total is what lets the DB layer recognise a finished pass (and so
+    # flip the series to Completed and bank the re-read). 0 when not yet cached —
+    # progress still saves, only the auto-complete waits for the count to warm up.
+    with _CACHE_LOCK:
+        total_pages = int(_PAGE_COUNTS.get(str(series_id)) or 0)
+    _db.update_last_read_progress(series_id, body.chapter_name, body.page, total_pages)
     return {"ok": True, "series_id": series_id, "chapter": body.chapter_name, "page": body.page}
 
 

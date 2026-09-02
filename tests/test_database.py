@@ -147,3 +147,56 @@ def test_search_matches_all_haystack_fields(db, tmp_path):
     assert ids("great art") == {sid}     # notes, multi-word AND
     assert ids("solo different") == set()  # AND across words narrows to nothing
     assert ids("") >= {sid, other}       # empty = everything
+
+
+# ------------------------------------------------- lifetime reading counters --
+
+def _counters(db, sid):
+    r = db.conn.execute(
+        "SELECT last_page, pages_read_total, times_completed, status FROM series WHERE id=?",
+        (sid,)).fetchone()
+    return int(r["last_page"]), int(r["pages_read_total"]), int(r["times_completed"]), r["status"]
+
+
+def test_lifetime_pages_survive_a_reread(db, tmp_path):
+    """A re-read moves the bookmark back to the start. The lifetime total must not
+    follow it down, or 'time spent' shrinks the more you read."""
+    lib = tmp_path / "lib"
+    lib_id = db.add_library(str(lib), name="L")
+    sid = _mk_series(db, lib_id, lib / "S", "S")
+    total = 100
+
+    db.update_last_read_progress(sid, "Chapter 0001", 40, total)
+    assert _counters(db, sid)[:3] == (40, 40, 0)
+
+    # Finishing the last page completes a pass and flips the status.
+    db.update_last_read_progress(sid, "Chapter 0009", 100, total)
+    last, lifetime, finishes, status = _counters(db, sid)
+    assert (last, lifetime, finishes, status) == (100, 100, 1, "Completed")
+
+    # Resting on the final page must not score finish after finish.
+    db.update_last_read_progress(sid, "Chapter 0009", 100, total)
+    assert _counters(db, sid)[2] == 1
+
+    # Re-read: bookmark goes back to page 1, lifetime total holds.
+    db.update_last_read_progress(sid, "Chapter 0001", 1, total)
+    last, lifetime, finishes, _ = _counters(db, sid)
+    assert (last, lifetime, finishes) == (1, 100, 1)
+
+    # Reading it again accumulates on top, and banks a second finish.
+    db.update_last_read_progress(sid, "Chapter 0009", 100, total)
+    last, lifetime, finishes, _ = _counters(db, sid)
+    assert (last, lifetime, finishes) == (100, 199, 2)
+
+
+def test_progress_without_a_known_total_never_completes(db, tmp_path):
+    """Page counts warm up in the background; until one is cached the caller passes
+    0, and a finish simply isn't detected. Progress still saves."""
+    lib = tmp_path / "lib"
+    lib_id = db.add_library(str(lib), name="L")
+    sid = _mk_series(db, lib_id, lib / "S", "S")
+
+    db.update_last_read_progress(sid, "Chapter 0001", 50)
+    last, lifetime, finishes, status = _counters(db, sid)
+    assert (last, lifetime, finishes) == (50, 50, 0)
+    assert status != "Completed"
