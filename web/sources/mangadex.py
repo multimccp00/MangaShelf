@@ -287,20 +287,33 @@ class MangaDexSource(MangaSource):
                     number=a.get("chapter") or "",
                     title=a.get("title") or "",
                     language=a.get("translatedLanguage") or lang,
+                    volume=a.get("volume") or "",
                 ))
             offset += 100
             if offset >= j.get("total", 0):
                 break
 
-        seen: set[str] = set()
-        uniq: list[ChapterMeta] = []
+        # One chapter per number. The same chapter is often uploaded twice — once
+        # loose and once tagged with the volume it was collected into — so prefer
+        # the copy from the HIGHEST volume. Note MangaDex reports the loose copy as
+        # volume "0" rather than leaving it blank, so "does it have a volume" is not
+        # the test: "0" is truthy and the volume would be lost on every chapter.
+        def _vol_rank(c: ChapterMeta) -> float:
+            try:
+                return float(c.volume)
+            except (TypeError, ValueError):
+                return -1.0
+
+        best: dict[str, ChapterMeta] = {}
+        order: list[str] = []
         for c in out:
             key = c.number or c.id
-            if key in seen:
-                continue
-            seen.add(key)
-            uniq.append(c)
-        return uniq
+            if key not in best:
+                best[key] = c
+                order.append(key)
+            elif _vol_rank(c) > _vol_rank(best[key]):
+                best[key] = c
+        return [best[k] for k in order]
 
     def _most_available_language(self, mid: str, exclude: str = "en") -> str:
         """The translated language (other than `exclude`) with the most chapters for

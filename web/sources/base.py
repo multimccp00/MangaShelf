@@ -23,6 +23,7 @@ class ChapterMeta:
     number: str = ""        # "1", "12.5", or "" for one-shots
     title: str = ""         # optional chapter title
     language: str = ""      # translated language code, when the source has it
+    volume: str = ""        # volume this chapter belongs to, when the source says
     url: str = ""           # optional canonical URL (for reference/logging)
 
 

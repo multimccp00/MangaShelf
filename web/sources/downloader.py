@@ -51,6 +51,17 @@ def _chapter_folder(ch: ChapterMeta, index: int) -> str:
         base = f"Chapter {num}"
     else:
         base = f"Chapter {index:04d}"
+    # Prefix the volume when the source knows it, so a series collected into
+    # volumes reads as such in the library. Left off entirely when unknown (most
+    # sources), keeping existing folder names unchanged. MangaDex reports loose
+    # chapters as volume "0", which is not a volume — no prefix for those either.
+    vol = (getattr(ch, "volume", "") or "").strip()
+    if vol and vol.strip("0."):
+        try:
+            vol = f"{int(float(vol)):02d}"
+        except ValueError:
+            pass
+        base = f"Vol {vol} - {base}"
     if ch.title:
         base = f"{base} - {_safe_name(ch.title)}"
     return _safe_name(base)
