@@ -29,7 +29,7 @@ import logging  # noqa: E402
 
 _log = logging.getLogger("mangashelf")
 
-from database import Database, DB_PATH  # noqa: E402
+from database import Database, DB_PATH, READING_STATUSES  # noqa: E402
 from scanner import (  # noqa: E402
     IMAGE_EXTENSIONS,
     get_first_image_path,
@@ -1126,6 +1126,52 @@ def get_facets(library: int | None = None) -> dict[str, Any]:
         "author_counts": author_counts,
         "series_counts": series_counts,
         "language_counts": language_counts,
+    }
+
+
+# Reading pace used to turn pages into hours. Deliberately a flat estimate: the
+# app has never tracked elapsed time, and inferring it from timestamps would
+# count a session left open overnight as twelve hours of reading.
+_SECONDS_PER_PAGE = 20
+
+
+@app.get("/api/profile", dependencies=[Depends(require_token_read)])
+def profile() -> dict[str, Any]:
+    """Reading stats across the whole library: how many series sit in each status,
+    lifetime pages read, times finished, and an estimated time spent.
+
+    Honours the app's hidePrivate setting, so a private library stays out of the
+    numbers exactly as it stays out of the library list."""
+    hide_private = bool(_load_settings().get("hidePrivate"))
+    rows = _db.reading_stats(hide_private)
+    by_status = {str(r["status"] or "Not Started"): r for r in rows}
+    # Every status is reported, including the empty ones — a profile that hides
+    # "Dropped" until you drop something reads as a bug.
+    statuses = [
+        {
+            "status": name,
+            "series": int(by_status[name]["series"]) if name in by_status else 0,
+            "pages": int(by_status[name]["pages"]) if name in by_status else 0,
+            "finishes": int(by_status[name]["finishes"]) if name in by_status else 0,
+        }
+        for name in READING_STATUSES
+    ]
+
+    pages = sum(s["pages"] for s in statuses)
+    finishes = sum(s["finishes"] for s in statuses)
+    return {
+        "statuses": statuses,
+        "totals": {
+            "series": sum(s["series"] for s in statuses),
+            "pages_read": pages,
+            "finishes": finishes,
+            "completed": next((s["series"] for s in statuses if s["status"] == "Completed"), 0),
+        },
+        "time": {
+            "seconds_per_page": _SECONDS_PER_PAGE,
+            "hours": round(pages * _SECONDS_PER_PAGE / 3600, 1),
+        },
+        "hide_private": hide_private,
     }
 
 

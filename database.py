@@ -399,6 +399,26 @@ class Database:
         self.conn.execute("UPDATE series SET favorite = ? WHERE id = ?", (int(favorite), series_id))
         self.conn.commit()
 
+    def reading_stats(self, hide_private: bool = False) -> list[dict]:
+        """Per-status totals across the library: series count, lifetime pages read
+        and times finished. `hide_private` drops private libraries, matching how
+        the UI hides them. Rows only exist for statuses actually in use — the
+        caller fills in the rest."""
+        where = "WHERE COALESCE(l.private, 0) = 0" if hide_private else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT s.status                             AS status,
+                   COUNT(*)                             AS series,
+                   COALESCE(SUM(s.pages_read_total), 0) AS pages,
+                   COALESCE(SUM(s.times_completed), 0)  AS finishes
+            FROM series s
+            LEFT JOIN libraries l ON l.id = s.library_id
+            {where}
+            GROUP BY s.status
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def set_status(self, series_id: int, status: str) -> None:
         if status not in READING_STATUSES:
             status = "Not Started"

@@ -109,3 +109,45 @@ def test_relevance_match_score_overrides_display_title():
 def test_norm_strips_punctuation_and_case():
     from sources.registry import _norm
     assert _norm("My Dress-Up Darling!") == "my dress up darling"
+
+
+# ---------------------------------------------------------------- profile --
+
+def test_profile_reports_every_status_and_totals(client_and_token):
+    import api
+    client, token, _page = client_and_token
+    h = {"X-MangaShelf-Token": token}
+
+    body = client.get("/api/profile", headers=h).json()
+
+    # Every status appears even at zero, so the UI never has a missing row.
+    from database import READING_STATUSES
+    assert [s["status"] for s in body["statuses"]] == READING_STATUSES
+
+    # Totals are the sum of the per-status rows, and hours follow from pages.
+    assert body["totals"]["pages_read"] == sum(s["pages"] for s in body["statuses"])
+    assert body["totals"]["series"] == sum(s["series"] for s in body["statuses"])
+    secs = body["time"]["seconds_per_page"]
+    expected = round(body["totals"]["pages_read"] * secs / 3600, 1)
+    assert body["time"]["hours"] == expected
+
+
+def test_profile_counts_a_finished_series(client_and_token):
+    """A finish reaches the profile as a Completed series and banked pages."""
+    import api
+    client, token, _page = client_and_token
+    h = {"X-MangaShelf-Token": token}
+
+    lib_id = api._db.get_libraries()[0]["id"]
+    folder = Path(api.DB_PATH).parent / "profile-series"
+    folder.mkdir(parents=True, exist_ok=True)
+    sid = api._db.upsert_series(lib_id, str(folder), "Profile Series")
+
+    before = client.get("/api/profile", headers=h).json()
+    api._db.update_last_read_progress(sid, "Chapter 0001", 30, 30)   # reaches the end
+    after = client.get("/api/profile", headers=h).json()
+
+    done = {s["status"]: s for s in after["statuses"]}["Completed"]
+    assert done["series"] >= 1
+    assert done["finishes"] >= 1
+    assert after["totals"]["pages_read"] == before["totals"]["pages_read"] + 30
