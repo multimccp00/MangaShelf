@@ -200,3 +200,21 @@ def test_progress_without_a_known_total_never_completes(db, tmp_path):
     last, lifetime, finishes, status = _counters(db, sid)
     assert (last, lifetime, finishes) == (50, 50, 0)
     assert status != "Completed"
+
+
+# ------------------------------------------------- scanner chapter detection --
+
+def test_volume_prefixed_folders_are_chapters_not_series():
+    """A chapter folder written as "Vol 01 - Chapter 0002" must read as a CHAPTER.
+    When it did not, the scanner registered all 317 chapter folders of three
+    imports as separate manga in the library."""
+    from scanner import _looks_like_chapter
+
+    for name in ("Chapter 0001", "Vol 01 - Chapter 0002", "Vol.2", "Ch.4",
+                 "Ep 5", "Episode 12", "Chap 01"):
+        assert _looks_like_chapter(name), name
+
+    # Real series names must never be mistaken for chapters.
+    for name in ("Bijin Onna Joushi Takizawa-san", "Chapter House", "Volume Zero",
+                 "Rent a Girlfriend Manga Online"):
+        assert not _looks_like_chapter(name), name

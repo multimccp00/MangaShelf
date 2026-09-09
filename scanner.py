@@ -26,9 +26,15 @@ IMAGE_EXTENSIONS = {
     ".psb",
 }
 SKIP_DIR_NAMES = {"$recycle.bin", "system volume information", "__pycache__"}
-# Matches names like: Chap 01, Chapter 3, Vol.2, Vol 002, Ep 5, Episode 12, Ch.4
+# Matches names like: Chap 01, Chapter 3, Vol.2, Vol 002, Ep 5, Episode 12, Ch.4,
+# and volume-prefixed chapters like "Vol 01 - Chapter 0002" (what the downloader
+# writes when a source reports which volume a chapter belongs to). The previous
+# pattern only accepted a leading "chap"/"chapter", so a volume-prefixed folder
+# was not recognised as a chapter and every one of them was scanned as its own
+# series — 317 chapter folders showed up in the library as separate manga.
 _CHAPTER_NAME_RE = re.compile(
-    r"^chap(?:ter)?[\s._-]*\d",
+    r"^(?:vol(?:ume)?[\s._-]*\d+[\s._-]*[-–—]?[\s._-]*)?"   # optional "Vol 01 - "
+    r"(?:chap(?:ter)?|ch|ep(?:isode)?|vol(?:ume)?)[\s._-]*\d",
     re.IGNORECASE,
 )
 
