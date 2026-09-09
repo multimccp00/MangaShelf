@@ -7,7 +7,13 @@
  * color/kanji fallbacks, plus cover/page URL helpers).
  */
 
-const API = "/api";
+// API base is derived from where the app is served, so it works both at the
+// host root (dev: localhost:8000) and behind a Tailscale sub-path (/manga).
+// Tailscale passes the /manga prefix through to the backend, so the browser
+// must call /manga/api/...  Detect a leading /manga (or /pixel) segment and
+// prefix the API with it; otherwise API stays at /api (root).
+const _seg = window.location.pathname.match(/^\/(manga|pixel)(?=\/|$)/);
+const API = (_seg ? _seg[0] : "") + "/api";
 
 // ---- normalization ---------------------------------------------------------
 
@@ -333,6 +339,11 @@ const ApiClient = {
   // Set / change / clear the app password (requires being logged in).
   setPassword(current, next) {
     return postJSON(`${API}/password`, { current: current || null, new: next || "" });
+  },
+  // Reading stats for the profile screen: per-status counts, lifetime pages,
+  // finishes and an estimated time spent.
+  profile() {
+    return getJSON(`${API}/profile`);
   },
   async listSeries(params = {}) {
     const qs = new URLSearchParams();

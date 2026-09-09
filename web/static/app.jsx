@@ -3,7 +3,7 @@ const { useState, useEffect, useRef } = React;
 
 // Bump on every frontend release; shown tiny in the corner so we can confirm which
 // bundle a browser is actually running (ends cache-vs-code guessing).
-const BUILD_VERSION = "web84";
+const BUILD_VERSION = "web85";
 
 // One background-job channel: polls a status endpoint while a job is active and
 // exposes start/dismiss. Used once per concurrent job type (import, move) so they
@@ -510,6 +510,8 @@ function App() {
                     r.queued ? "ok" : "info"))
                   .catch((e) => window.toast(`Sync failed: ${e.message || e}`, "error"));
               }}><window.IconCycle size={13} /> Sync</button>
+            <button className="btn ghost sm settings-btn" title="Settings & libraries"
+              onClick={() => setSettingsOpen(true)}><window.IconGear size={13} /> Settings</button>
             {/* "From link" button removed — importing by URL still works by pasting
                 a link into the search bar (landing or overlay). */}
           </header>
@@ -527,6 +529,19 @@ function App() {
           )}
           {loaded && screen === "library" && (
             <window.Library onOpenDetail={openDetail} onOpenSearch={openSearch} density={t.density} setDensity={(d) => setTweak("density", d)} />
+          )}
+          {loaded && screen === "profile" && (
+            <window.Profile
+              onOpenSeries={async (it) => {
+                // The shelves carry only id/title; the detail screen wants a
+                // fully normalized series, so fetch it before opening.
+                try {
+                  openDetail(await window.ApiClient.getSeries(it.id));
+                } catch (e) {
+                  window.toast(`Couldn't open ${it.title}: ${e.message || e}`, "error");
+                }
+              }}
+            />
           )}
           {loaded && screen === "detail" && detail && (
             <window.Detail
@@ -633,8 +648,10 @@ function App() {
         <LibrarySwitcher
           libraries={visibleLibraries}
           activeLib={activeLib}
-          onSwitch={switchLibrary}
+          onSwitch={(id) => { switchLibrary(id); if (screen === "profile") { setScreen("library"); scrollTop(); } }}
           onOpenSettings={() => setSettingsOpen(true)}
+          onOpenProfile={() => { setScreen("profile"); scrollTop(); }}
+          onProfile={screen === "profile"}
           gearOnly={!showSwitcher}
         />
       )}
@@ -709,9 +726,8 @@ function LoginScreen({ onLoggedIn }) {
 // library on tap (no menu); rotating INTO a private library asks for a confirm
 // (per setting). A companion gear opens Settings — it fades in on hover on
 // desktop, and is reachable via a long-press on the FAB on touch devices.
-function LibrarySwitcher({ libraries, activeLib, onSwitch, onOpenSettings, gearOnly }) {
+function LibrarySwitcher({ libraries, activeLib, onSwitch, onOpenSettings, onOpenProfile, onProfile, gearOnly }) {
   const active = libraries.find((l) => l.id === activeLib);
-  const [spin, setSpin] = useState(0);          // bump to replay the rotate animation
   const longPressRef = useRef(null);            // timer id for touch long-press
   const longFiredRef = useRef(false);           // true once long-press opened settings
 
@@ -720,6 +736,9 @@ function LibrarySwitcher({ libraries, activeLib, onSwitch, onOpenSettings, gearO
   if (gearOnly) {
     return (
       <div className="lib-switcher">
+        <button className="lib-switcher-gear always" title="Reading record" onClick={onOpenProfile}>
+          <window.IconUser size={16} />
+        </button>
         <button className="lib-switcher-gear always" title="Settings & libraries" onClick={onOpenSettings}>
           <window.IconGear size={16} />
         </button>
@@ -727,19 +746,27 @@ function LibrarySwitcher({ libraries, activeLib, onSwitch, onOpenSettings, gearO
     );
   }
 
-  // The next library in the list, wrapping around. Returns null if there's
-  // 0 or 1 library (nothing to cycle to).
-  function nextLibrary() {
+  // One ring: every library, then the reading record, then back to the first
+  // library. The FAB is a single control that steps through all of them rather
+  // than a cluster of buttons, so the next stop is always one tap away.
+  // The record sits between every pair of libraries: library -> record ->
+  // next library -> record -> ... That keeps it one tap from wherever you are,
+  // and stops a private library standing between you and your own stats — with
+  // the record simply last in the ring, reaching it meant clearing the
+  // "switch to a private library?" confirm every single time.
+  function nextStop() {
+    if (!onProfile) return { profile: true };
     if (!libraries.length) return null;
     const i = libraries.findIndex((l) => l.id === activeLib);
-    if (i === -1) return libraries[0];
-    if (libraries.length < 2) return null;
-    return libraries[(i + 1) % libraries.length];
+    return { lib: libraries[(i + 1) % libraries.length] };
   }
 
   async function cycle() {
-    const next = nextLibrary();
-    if (!next) return;                            // only one library — nothing to do
+    const stop = nextStop();
+    if (!stop) return;
+    if (stop.profile) { onOpenProfile(); return; }
+    const next = stop.lib;
+    if (next.id === activeLib && !onProfile) return;   // nowhere else to go
     if (next.private && window.Settings.confirmPrivate) {
       const ok = await window.confirmDialog({
         title: `Switch to “${next.name}”?`,
@@ -749,7 +776,6 @@ function LibrarySwitcher({ libraries, activeLib, onSwitch, onOpenSettings, gearO
       });
       if (!ok) return;
     }
-    setSpin((n) => n + 1);                         // replay the rotate animation
     onSwitch(next.id);
   }
 
@@ -766,31 +792,31 @@ function LibrarySwitcher({ libraries, activeLib, onSwitch, onOpenSettings, gearO
   }
   function onClick() {
     // A long-press already opened Settings — swallow the trailing click so we
-    // don't ALSO cycle the library.
+    // don't ALSO advance the ring.
     if (longFiredRef.current) { longFiredRef.current = false; return; }
     cycle();
   }
 
-  const only = libraries.length < 2;              // single library: FAB can't cycle
+  const stop = nextStop();
+  const goingTo = !stop ? "" : stop.profile ? "your reading record" : stop.lib.name;
 
   return (
     <div className="lib-switcher">
-      {/* Companion gear: hover-reveal on desktop (handled in CSS); always shown
-          when the cycle FAB can't do anything (single library). */}
+      {/* One companion only — Settings. Everything else is a stop on the FAB's
+          ring, so there is never a button per destination. */}
       <button
-        className={"lib-switcher-gear" + (only ? " always" : "")}
+        className="lib-switcher-gear"
         title="Settings & libraries"
         onClick={onOpenSettings}
       >
         <window.IconGear size={16} />
       </button>
       <button
-        className={"lib-switcher-fab" + (active && active.private ? " private" : "") + (spin ? " spin" : "")}
-        key={"fab-" + spin}
+        className={"lib-switcher-fab" + (!onProfile && active && active.private ? " private" : "")}
         title={
-          only
-            ? (active ? `Library: ${active.name}` : "Library")
-            : (active ? `Library: ${active.name} — tap to switch, long-press for settings` : "Switch library")
+          (onProfile ? "Reading record" : active ? `Library: ${active.name}` : "Library")
+          + (goingTo ? ` — tap for ${goingTo}` : "")
+          + ", long-press for settings"
         }
         onClick={onClick}
         onContextMenu={(e) => { e.preventDefault(); onOpenSettings(); }}
@@ -799,8 +825,10 @@ function LibrarySwitcher({ libraries, activeLib, onSwitch, onOpenSettings, gearO
         onTouchMove={clearLongPress}
         onTouchCancel={clearLongPress}
       >
-        <window.IconLibrary size={20} />
-        {active && active.private && <span className="lib-switcher-fab-lock"><window.IconLock size={11} /></span>}
+        {onProfile ? <window.IconUser size={20} /> : <window.IconLibrary size={20} />}
+        {!onProfile && active && active.private && (
+          <span className="lib-switcher-fab-lock"><window.IconLock size={11} /></span>
+        )}
       </button>
     </div>
   );
