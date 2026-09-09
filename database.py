@@ -419,6 +419,56 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
+    def reading_stats_by_library(self, hide_private: bool = False) -> list[dict]:
+        """Same totals as reading_stats, but grouped per library. Without this the
+        profile shows one combined figure and there is no way to tell whether a
+        library is even being counted."""
+        where = "WHERE COALESCE(l.private, 0) = 0" if hide_private else ""
+        rows = self.conn.execute(
+            f"""
+            SELECT l.id                                 AS id,
+                   l.name                               AS name,
+                   COALESCE(l.private, 0)               AS private,
+                   COUNT(s.id)                          AS series,
+                   COALESCE(SUM(s.pages_read_total), 0) AS pages,
+                   COALESCE(SUM(s.times_completed), 0)  AS finishes
+            FROM libraries l
+            LEFT JOIN series s ON s.library_id = l.id
+            {where}
+            GROUP BY l.id
+            ORDER BY pages DESC, name COLLATE NOCASE
+            """
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def recent_series(self, statuses: list[str], limit: int = 10,
+                      hide_private: bool = False) -> list[dict]:
+        """Most-recently-read series in the given statuses, across every library.
+        The profile shows these as covers — a reading record made only of numbers
+        has nothing on it that looks like the thing being recorded."""
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        where = [f"s.status IN ({placeholders})"]
+        params: list = list(statuses)
+        if hide_private:
+            where.append("COALESCE(l.private, 0) = 0")
+        rows = self.conn.execute(
+            f"""
+            SELECT s.id AS id, s.title AS title, s.status AS status,
+                   COALESCE(s.pages_read_total, 0) AS pages,
+                   COALESCE(s.times_completed, 0)  AS finishes,
+                   s.last_read AS last_read
+            FROM series s
+            LEFT JOIN libraries l ON l.id = s.library_id
+            WHERE {" AND ".join(where)}
+            ORDER BY COALESCE(s.last_read, '1970-01-01') DESC, s.id DESC
+            LIMIT ?
+            """,
+            params + [int(limit)],
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def set_status(self, series_id: int, status: str) -> None:
         if status not in READING_STATUSES:
             status = "Not Started"

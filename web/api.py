@@ -1144,7 +1144,24 @@ def profile() -> dict[str, Any]:
     numbers exactly as it stays out of the library list."""
     hide_private = bool(_load_settings().get("hidePrivate"))
     rows = _db.reading_stats(hide_private)
+    libraries = _db.reading_stats_by_library(hide_private)
     by_status = {str(r["status"] or "Not Started"): r for r in rows}
+
+    def _shelf(statuses: list[str], limit: int) -> list[dict[str, Any]]:
+        out = []
+        for r in _db.recent_series(statuses, limit, hide_private):
+            sid = int(r["id"])
+            out.append({
+                "id": sid,
+                "title": str(r["title"] or ""),
+                "status": str(r["status"] or ""),
+                "pages": int(r["pages"]),
+                "finishes": int(r["finishes"]),
+                # The client builds the cover URL itself (it holds the token);
+                # cover_v busts the cache the moment a custom cover changes.
+                "cover_v": _cover_version(sid),
+            })
+        return out
     # Every status is reported, including the empty ones — a profile that hides
     # "Dropped" until you drop something reads as a bug.
     statuses = [
@@ -1161,6 +1178,19 @@ def profile() -> dict[str, Any]:
     finishes = sum(s["finishes"] for s in statuses)
     return {
         "statuses": statuses,
+        "reading": _shelf(["Reading"], 10),
+        "finished": _shelf(["Completed"], 10),
+        "libraries": [
+            {
+                "id": int(l["id"]),
+                "name": str(l["name"] or "Library"),
+                "private": bool(l["private"]),
+                "series": int(l["series"]),
+                "pages": int(l["pages"]),
+                "finishes": int(l["finishes"]),
+            }
+            for l in libraries
+        ],
         "totals": {
             "series": sum(s["series"] for s in statuses),
             "pages_read": pages,

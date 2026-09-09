@@ -36,6 +36,7 @@ const FILES = [
   "screens-library.jsx",
   "screens-reader.jsx",
   "screens-detail.jsx",
+  "screens-profile.jsx",
   "app.jsx",
 ];
 
