@@ -1,9 +1,10 @@
 {
+  "id": "mangashelf-app",
   "name": "MangaShelf",
   "short_name": "MangaShelf",
   "description": "Self-hosted manga library and reader",
-  "start_url": "/",
-  "scope": "/",
+  "start_url": "./?pwa=mangashelf",
+  "scope": "./",
   "display": "standalone",
   "orientation": "any",
   "background_color": "#0b0b10",
