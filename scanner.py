@@ -65,27 +65,41 @@ def is_image(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
 
 
-def list_images_in_dir(directory: Path) -> list[str]:
-    if not directory.exists() or not directory.is_dir():
-        return []
+def _scan_dir(directory: Path) -> tuple[list[str], list[Path], list[str]]:
+    """One scandir pass -> (natural-sorted image paths, natural-sorted PDFs,
+    subdir names). DirEntry.is_file()/is_dir() reuse the directory listing
+    on Windows, so this costs no per-file stat (the old is_file() per entry did)."""
+    images: list[Path] = []
+    pdfs: list[Path] = []
+    subdirs: list[str] = []
     try:
-        images = [p for p in directory.iterdir() if is_image(p)]
+        with os.scandir(directory) as it:
+            for e in it:
+                try:
+                    if e.is_dir():
+                        subdirs.append(e.name)
+                    elif e.is_file():
+                        ext = os.path.splitext(e.name)[1].lower()
+                        if ext in IMAGE_EXTENSIONS:
+                            images.append(Path(e.path))
+                        elif ext in pdf_support.PDF_EXTS:
+                            pdfs.append(Path(e.path))
+                except OSError:
+                    continue
     except OSError:
-        return []
+        return [], [], []
     images.sort(key=lambda p: natural_key(p.name))
-    return [str(p) for p in images]
+    pdfs.sort(key=lambda p: natural_key(p.name))
+    return [str(p) for p in images], pdfs, subdirs
+
+
+def list_images_in_dir(directory: Path) -> list[str]:
+    return _scan_dir(directory)[0]
 
 
 def list_pdfs_in_dir(directory: Path) -> list[Path]:
     """PDF files directly inside `directory`, natural-sorted by name."""
-    if not directory.exists() or not directory.is_dir():
-        return []
-    try:
-        pdfs = [p for p in directory.iterdir() if p.is_file() and pdf_support.is_pdf(p)]
-    except OSError:
-        return []
-    pdfs.sort(key=lambda p: natural_key(p.name))
-    return pdfs
+    return _scan_dir(directory)[1]
 
 
 def dir_has_content(directory: Path) -> bool:
@@ -151,20 +165,28 @@ def get_first_image_path(directory: str | Path) -> str | None:
     return None
 
 
-def find_chapter_dirs(series_dir: Path) -> list[Path]:
-    chapter_dirs: list[Path] = []
-    for current_root, dirs, _ in os.walk(series_dir, topdown=True):
-        root_path = Path(current_root)
-        # Skip hidden metadata/system folders to reduce scan errors and noise.
-        dirs[:] = [d for d in dirs if not d.startswith(".") and d.lower() not in SKIP_DIR_NAMES]
-        if root_path != series_dir and dir_has_content(root_path):
-            chapter_dirs.append(root_path)
-            # Treat the first folder that directly contains images/PDFs as the
-            # chapter root. Pruning avoids adding nested folders as duplicates.
-            dirs.clear()
+def _walk_chapter_dirs(series_dir: Path) -> list[tuple[Path, list[str], list[Path]]]:
+    """Chapter folders under series_dir with the images/PDFs found in them, so
+    callers don't list each folder again. The first folder that directly holds
+    images/PDFs is the chapter root; nested folders are not descended."""
+    found: list[tuple[Path, list[str], list[Path]]] = []
+    stack = [series_dir]
+    while stack:
+        cur = stack.pop()
+        images, pdfs, subdirs = _scan_dir(cur)
+        if cur != series_dir and (images or pdfs):
+            found.append((cur, images, pdfs))
             continue
-    chapter_dirs.sort(key=lambda p: natural_key(p.relative_to(series_dir).as_posix()))
-    return chapter_dirs
+        stack.extend(
+            cur / d for d in subdirs
+            if not d.startswith(".") and d.lower() not in SKIP_DIR_NAMES
+        )
+    found.sort(key=lambda t: natural_key(t[0].relative_to(series_dir).as_posix()))
+    return found
+
+
+def find_chapter_dirs(series_dir: Path) -> list[Path]:
+    return [d for d, _, _ in _walk_chapter_dirs(series_dir)]
 
 
 def discover_series_dirs(root: Path) -> list[Path]:
@@ -198,8 +220,13 @@ def discover_series_dirs(root: Path) -> list[Path]:
 def _pages_for_chapter_dir(chapter_dir: Path) -> list[str]:
     """Page tokens for a chapter folder: its image files, plus a flattened page
     list for any PDFs inside it (each PDF page becomes one token)."""
-    pages: list[str] = list_images_in_dir(chapter_dir)
-    for pdf in list_pdfs_in_dir(chapter_dir):
+    images, pdfs, _ = _scan_dir(chapter_dir)
+    return _pages(images, pdfs)
+
+
+def _pages(images: list[str], pdfs: list[Path]) -> list[str]:
+    pages = list(images)
+    for pdf in pdfs:
         pages.extend(pdf_support.page_tokens(pdf))
     return pages
 
@@ -209,17 +236,16 @@ def detect_series(series_dir: Path) -> ScannedSeries:
 
     # Prefer explicit chapter folders when they exist (these may hold images
     # and/or PDFs).
-    chapter_dirs = find_chapter_dirs(series_dir)
-    for chapter_dir in chapter_dirs:
-        pages = _pages_for_chapter_dir(chapter_dir)
+    chapter_dirs = _walk_chapter_dirs(series_dir)
+    for chapter_dir, images, pdfs in chapter_dirs:
+        pages = _pages(images, pdfs)
         if not pages:
             continue
         rel = chapter_dir.relative_to(series_dir).as_posix()
         chapters.append(ScannedChapter(name=rel, path=str(chapter_dir), images=pages))
 
     # Content sitting directly in the series root.
-    direct_images = list_images_in_dir(series_dir)
-    direct_pdfs = list_pdfs_in_dir(series_dir)
+    direct_images, direct_pdfs, _ = _scan_dir(series_dir)
 
     # Each PDF directly in the series root is its own chapter (named by filename).
     for pdf in direct_pdfs:
@@ -236,6 +262,7 @@ def detect_series(series_dir: Path) -> ScannedSeries:
         )
 
     chapters.sort(key=lambda c: natural_key(c.name))
+    pdf_support.save_counts()
     return ScannedSeries(title=series_dir.name, folder_path=str(series_dir), chapters=chapters)
 
 

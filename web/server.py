@@ -33,7 +33,8 @@ class NoCacheHTMLMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
         path = request.url.path
-        if path.endswith(".html") or path == "/":
+        # sw.js too: the browser must always see a new worker the moment it ships.
+        if path.endswith(".html") or path.endswith("/sw.js") or path == "/":
             response.headers["Cache-Control"] = "no-store, must-revalidate"
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"

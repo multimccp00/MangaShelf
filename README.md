@@ -1,4 +1,15 @@
-# CODING AGENTS: READ THIS FIRST
+# MangaShelf
+
+Self-hosted web app that turns folders of manga/comics on disk into a searchable, taggable library you can browse and read from any device, with pluggable importers for new series from online sources.
+
+- **Backend:** FastAPI app in `web/api.py`, SQLite (`database.py`), folder scanner (`scanner.py`), PDF support, reading lists
+- **Frontend:** React, in `web/`
+- **Features:** faceted search (genres, tags, authors, language, status), ratings/favorites, metadata and cover editing, in-browser reader (vertical + right-to-left) with progress tracking
+- Config lives in `~/.mangashelf/config.json`. Remote access: see `REMOTE_ACCESS.md`. Longer write-up: `PORTFOLIO.md`.
+
+---
+
+## Original design handoff note (historical)
 
 This is a **handoff bundle** from Claude Design (claude.ai/design).
 

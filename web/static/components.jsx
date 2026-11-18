@@ -599,6 +599,7 @@ function LibraryCard({ item, onOpen, compact, onDeleted }) {
                 : { color: statusColor, borderColor: `${statusColor}55` }}>
               <IconCycle size={14} />
             </button>
+            {window.OfflineBubble && <window.OfflineBubble item={item} />}
             <button className="card-action-btn delete-bubble" title="Remove from library" onClick={deleteCard}>
               <IconTrash size={13} />
             </button>
@@ -671,6 +672,7 @@ function RailCard({ item, onOpen, onDeleted }) {
               : { color: statusColor, borderColor: `${statusColor}55` }}>
             <IconCycle size={14} />
           </button>
+          {window.OfflineBubble && <window.OfflineBubble item={item} />}
           <button className="card-action-btn delete-bubble" title="Remove from library" onClick={deleteCard}>
             <IconTrash size={13} />
           </button>

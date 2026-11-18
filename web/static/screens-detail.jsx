@@ -50,7 +50,7 @@ function parseChapterName(name) {
 
 // One chapter card: cover, badges, label, and a hover edit button that opens an
 // inline editor for the chapter number + title (renames the folder on disk).
-function ChapterCard({ ch, displayIndex, item, read, stColor, canEdit, onOpen, onRename }) {
+function ChapterCard({ ch, displayIndex, item, read, stColor, canEdit, onOpen, onRename, unavailable }) {
   const parsed = parseChapterName(ch.name);
   const [editing, setEditing] = useStateDtl(false);
   const [num, setNum] = useStateDtl(parsed.number == null ? "" : String(parsed.number));
@@ -68,8 +68,12 @@ function ChapterCard({ ch, displayIndex, item, read, stColor, canEdit, onOpen, o
 
   return (
     <div
-      className={"chapter-card" + (ch.isRead ? " done" : "") + (ch.inProgress ? " in-progress" : "")}
-      onClick={() => !editing && onOpen()}
+      className={"chapter-card" + (ch.isRead ? " done" : "") + (ch.inProgress ? " in-progress" : "") + (unavailable ? " off-unavailable" : "")}
+      onClick={() => {
+        if (editing) return;
+        if (unavailable) { window.toast("Not downloaded — connect to read this chapter", "info"); return; }
+        onOpen();
+      }}
       onKeyDown={(e) => { if (!editing && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpen(); } }}
       role="button"
       tabIndex={editing ? -1 : 0}
@@ -81,6 +85,7 @@ function ChapterCard({ ch, displayIndex, item, read, stColor, canEdit, onOpen, o
           {ch.isRead && <div className="chapter-badge done"><window.IconCheck size={13} /></div>}
           {ch.inProgress && <div className="chapter-badge progress"><window.IconDot size={10} /></div>}
         </div>
+        {window.ChapterOfflineBtn && <window.ChapterOfflineBtn seriesId={item.id} ch={ch} />}
         {canEdit && !editing && (
           <button className="chapter-edit-btn" title="Rename chapter" onClick={open}>
             <window.IconPencil size={13} />
@@ -225,6 +230,8 @@ function MoveModal({ item, libraries, onClose, onStarted }) {
 function Detail({ item: initialItem, libraries = [], refreshSignal, onBack, onMoveStarted, onOpenReader }) {
   // Load the full series record (with real chapters) on mount.
   const [item, setItem] = useStateDtl(initialItem);
+  // Re-renders on connectivity / download changes so chapter badges stay current.
+  const online = window.useOfflineTick ? window.useOfflineTick() : true;
   const [moveOpen, setMoveOpen] = useStateDtl(false);
   const [resync, setResync] = useStateDtl(null);   // {message,error,done} while syncing
   const [loading, setLoading] = useStateDtl(!initialItem.chapters);
@@ -580,6 +587,7 @@ function Detail({ item: initialItem, libraries = [], refreshSignal, onBack, onMo
             }} disabled={loading || totalPages === 0}>
               {loading ? "Loading…" : totalPages === 0 ? "No pages" : continueLabel}
             </button>
+            {!loading && window.OfflineMenu && <window.OfflineMenu seriesId={item.id} chapterRows={chapterRows} />}
           </div>
 
           <StarRating value={item.rating || 0} onChange={(n) => saveField("rating", n)} />
@@ -759,6 +767,7 @@ function Detail({ item: initialItem, libraries = [], refreshSignal, onBack, onMo
                   canEdit={chapters.length > 1 || (ch.path && ch.path !== item.folder_path)}
                   onOpen={() => onOpenReader(item, ch.startPage, ch.endPage)}
                   onRename={renameChapter}
+                  unavailable={!online && !(window.Offline && window.Offline.chapterState(item.id, ch.index) === "done")}
                 />
               ))}
             </div>
@@ -865,4 +874,4 @@ function TokenEditor({ values, counts, suggestions, color, onChange, single, add
   );
 }
 
-Object.assign(window, { Detail });
+Object.assign(window, { Detail, TokenEditor });

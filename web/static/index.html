@@ -9,8 +9,8 @@
   <link rel="apple-touch-icon" href="icons/custom-apple-touch-icon.png?v=icon3" />
   <meta name="theme-color" content="#0b0b10" />
   <!-- PWA: lets phones "Add to Home Screen" and launch fullscreen (standalone).
-       Deliberately NO service worker — the app needs the server anyway, and a
-       stale offline cache is worse than none. -->
+       The service worker (sw.js, registered by offline.js) is network-first, so a
+       connected device always gets the fresh UI; the cache is only the offline fallback. -->
   <link rel="manifest" href="manifest.json" />
   <meta name="mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -19,7 +19,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&family=Noto+Serif+JP:wght@400;500;700&family=Zen+Tokyo+Zoo&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=web115" />
+  <link rel="stylesheet" href="styles.css?v=web137" />
 </head>
 <body>
   <div id="root"></div>
@@ -29,10 +29,11 @@
   <script src="vendor/react-dom.production.min.js"></script>
 
   <!-- Real data client (replaces the prototype's data.js) -->
-  <script src="api.js?v=web115"></script>
+  <script src="api.js?v=web137"></script>
+  <script src="offline.js?v=web137"></script>
 
   <!-- App bundle: the .jsx sources precompiled + minified by build.js.
        Edit the .jsx files and run `npm run build` (or `npm run watch`) to regenerate. -->
-  <script src="app.bundle.js?v=web115"></script>
+  <script src="app.bundle.js?v=web137"></script>
 </body>
 </html>

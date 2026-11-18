@@ -8,9 +8,12 @@
 $root = Split-Path $PSScriptRoot -Parent
 $url = "http://localhost:8000"
 
+# Probe 127.0.0.1, NOT "localhost": the server binds IPv4 only, and on Windows
+# "localhost" tries [::1] first and can hang for seconds before falling back,
+# which stalled every poll (and the whole launch) while the server was already up.
 function Test-Up {
     try {
-        (Invoke-WebRequest -Uri "$url/api/health" -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200
+        (Invoke-WebRequest -Uri "http://127.0.0.1:8000/api/health" -UseBasicParsing -TimeoutSec 2).StatusCode -eq 200
     } catch { $false }
 }
 
@@ -19,13 +22,6 @@ function Test-Up {
 # else — another app window, a tray icon, a dev shell — so we leave it alone.
 $ollamaProc = $null
 $serverProc = $null
-
-# Local LLM for the AI import fallback (sources/ai.py probes localhost:11434).
-# Optional: if Ollama isn't installed, the AI source just stays unavailable.
-$ollama = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
-if ((Test-Path $ollama) -and -not (Get-Process ollama -ErrorAction SilentlyContinue)) {
-    $ollamaProc = Start-Process $ollama "serve" -WindowStyle Hidden -PassThru
-}
 
 if (-not (Test-Up)) {
     # Loopback ONLY: the LAN can't reach the server at all. Phone access flows
@@ -37,11 +33,9 @@ if (-not (Test-Up)) {
     $serverProc = Start-Process -FilePath (Join-Path $root ".venv\Scripts\python.exe") `
         -ArgumentList ('"' + (Join-Path $root "web\server.py") + '"') `
         -WorkingDirectory $root -WindowStyle Hidden -PassThru
-    # Wait up to ~20s for the server to come up (first start scans the library).
-    for ($i = 0; $i -lt 40; $i++) {
-        if (Test-Up) { break }
-        Start-Sleep -Milliseconds 500
-    }
+    # No waiting here: the window opens at once on splash.html (below), which
+    # polls the server and hands over when it answers — so the browser's own
+    # cold start overlaps the server's instead of following it.
 }
 
 # Prefer Chrome; fall back to Edge (always present on Windows 11).
@@ -56,7 +50,10 @@ $chrome = @(
 # exits instantly — we'd then tear the server down while the window is still
 # open. A dedicated profile guarantees the PID we wait on IS the app window.
 $profileDir = Join-Path $env:LOCALAPPDATA "MangaShelf\browser"
-$browserArgs = "--app=$url", "--user-data-dir=`"$profileDir`""
+# splash.html shows immediately and forwards to $url once /api/health answers.
+# If the server was already up, skip the splash.
+$startUrl = if ($serverProc) { "file:///" + ((Join-Path $PSScriptRoot "static\splash.html") -replace "\\", "/") } else { $url }
+$browserArgs = "--app=$startUrl", "--user-data-dir=`"$profileDir`""
 
 try {
     if ($chrome) {
@@ -64,6 +61,13 @@ try {
     } else {
         $win = Start-Process "msedge.exe" -ArgumentList $browserArgs -PassThru
     }
+
+# Local LLM for the AI import fallback (sources/ai.py probes localhost:11434).
+# Optional: if Ollama isn't installed, the AI source just stays unavailable.
+$ollama = "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe"
+if ((Test-Path $ollama) -and -not (Get-Process ollama -ErrorAction SilentlyContinue)) {
+    $ollamaProc = Start-Process $ollama "serve" -WindowStyle Hidden -PassThru
+}
 
     $win.WaitForExit()
 

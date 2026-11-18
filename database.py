@@ -213,6 +213,10 @@ class Database:
             # screen's Continue Reading priority; cleared on the next progress save.
             self.conn.execute("ALTER TABLE series ADD COLUMN fresh_chapters INTEGER DEFAULT 0")
             changed = True
+        if "last_device" not in columns:
+            # Which device last saved progress (phone vs desktop), shown on Detail.
+            self.conn.execute("ALTER TABLE series ADD COLUMN last_device TEXT")
+            changed = True
         if changed:
             self.conn.commit()
 
@@ -399,12 +403,31 @@ class Database:
         self.conn.execute("UPDATE series SET favorite = ? WHERE id = ?", (int(favorite), series_id))
         self.conn.commit()
 
-    def reading_stats(self, hide_private: bool = False) -> list[dict]:
+    @staticmethod
+    def _hidden_sql(terms: list[str] | None, alias: str = "s") -> tuple[str, list[str]]:
+        """SQL + params excluding series that carry any of `terms` as a tag or genre
+        (case-insensitive). ('', []) when there is nothing to hide."""
+        terms = [str(t).strip().lower() for t in (terms or []) if str(t).strip()]
+        if not terms:
+            return "", []
+        ph = ",".join("?" for _ in terms)
+        sql = (
+            f"NOT EXISTS (SELECT 1 FROM tags ht WHERE ht.series_id = {alias}.id AND LOWER(ht.tag) IN ({ph})) "
+            f"AND NOT EXISTS (SELECT 1 FROM series_genres hg JOIN genres hn ON hn.id = hg.genre_id "
+            f"WHERE hg.series_id = {alias}.id AND LOWER(hn.name) IN ({ph}))"
+        )
+        return sql, terms + terms
+
+    def reading_stats(self, hide_private: bool = False, hide_terms: list[str] | None = None) -> list[dict]:
         """Per-status totals across the library: series count, lifetime pages read
         and times finished. `hide_private` drops private libraries, matching how
         the UI hides them. Rows only exist for statuses actually in use — the
         caller fills in the rest."""
-        where = "WHERE COALESCE(l.private, 0) = 0" if hide_private else ""
+        parts = ["COALESCE(l.private, 0) = 0"] if hide_private else []
+        hsql, hparams = self._hidden_sql(hide_terms)
+        if hsql:
+            parts.append(hsql)
+        where = f"WHERE {' AND '.join(parts)}" if parts else ""
         rows = self.conn.execute(
             f"""
             SELECT s.status                             AS status,
@@ -415,15 +438,18 @@ class Database:
             LEFT JOIN libraries l ON l.id = s.library_id
             {where}
             GROUP BY s.status
-            """
+            """,
+            hparams,
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def reading_stats_by_library(self, hide_private: bool = False) -> list[dict]:
+    def reading_stats_by_library(self, hide_private: bool = False, hide_terms: list[str] | None = None) -> list[dict]:
         """Same totals as reading_stats, but grouped per library. Without this the
         profile shows one combined figure and there is no way to tell whether a
         library is even being counted."""
         where = "WHERE COALESCE(l.private, 0) = 0" if hide_private else ""
+        hsql, hparams = self._hidden_sql(hide_terms)
+        join_extra = f" AND {hsql}" if hsql else ""
         rows = self.conn.execute(
             f"""
             SELECT l.id                                 AS id,
@@ -433,16 +459,17 @@ class Database:
                    COALESCE(SUM(s.pages_read_total), 0) AS pages,
                    COALESCE(SUM(s.times_completed), 0)  AS finishes
             FROM libraries l
-            LEFT JOIN series s ON s.library_id = l.id
+            LEFT JOIN series s ON s.library_id = l.id{join_extra}
             {where}
             GROUP BY l.id
             ORDER BY pages DESC, name COLLATE NOCASE
-            """
+            """,
+            hparams,
         ).fetchall()
         return [dict(r) for r in rows]
 
     def recent_series(self, statuses: list[str], limit: int = 10,
-                      hide_private: bool = False) -> list[dict]:
+                      hide_private: bool = False, hide_terms: list[str] | None = None) -> list[dict]:
         """Most-recently-read series in the given statuses, across every library.
         The profile shows these as covers — a reading record made only of numbers
         has nothing on it that looks like the thing being recorded."""
@@ -453,6 +480,10 @@ class Database:
         params: list = list(statuses)
         if hide_private:
             where.append("COALESCE(l.private, 0) = 0")
+        hsql, hparams = self._hidden_sql(hide_terms)
+        if hsql:
+            where.append(hsql)
+            params += hparams
         rows = self.conn.execute(
             f"""
             SELECT s.id AS id, s.title AS title, s.status AS status,
@@ -469,18 +500,61 @@ class Database:
         ).fetchall()
         return [dict(r) for r in rows]
 
-    def set_status(self, series_id: int, status: str) -> None:
+    @staticmethod
+    def _norm_ts(read_at: str | None) -> str | None:
+        """Client ISO timestamp -> the 'YYYY-MM-DD HH:MM:SS' UTC form last_read uses.
+        Future stamps (a fast phone clock) are clamped to now; junk -> None."""
+        if not read_at:
+            return None
+        from datetime import datetime, timedelta, timezone
+        try:
+            dt = datetime.fromisoformat(str(read_at).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(timezone.utc)
+        now = datetime.now(timezone.utc)
+        if dt > now + timedelta(minutes=5):
+            dt = now
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _is_stale(self, series_id: int, ts: str | None) -> bool:
+        """True when a queued offline write is older than what the DB already has."""
+        if not ts:
+            return False
+        row = self.conn.execute("SELECT last_read FROM series WHERE id = ?", (series_id,)).fetchone()
+        cur = str(row["last_read"] or "") if row else ""
+        return bool(cur) and ts < cur
+
+    def set_status(self, series_id: int, status: str, read_at: str | None = None) -> bool:
+        """Returns False when `read_at` (an offline write) is older than the DB's
+        last_read, so a stale replay can't overwrite newer progress."""
         if status not in READING_STATUSES:
             status = "Not Started"
-        self.conn.execute("UPDATE series SET status = ? WHERE id = ?", (status, series_id))
+        ts = self._norm_ts(read_at)
+        if self._is_stale(series_id, ts):
+            return False
+        if ts:
+            self.conn.execute("UPDATE series SET status = ?, last_read = ? WHERE id = ?",
+                              (status, ts, series_id))
+        else:
+            self.conn.execute("UPDATE series SET status = ? WHERE id = ?", (status, series_id))
         self.conn.commit()
+        return True
 
     def update_last_read_progress(self, series_id: int, chapter_name: str, page_number: int,
-                                  total_pages: int = 0) -> None:
+                                  total_pages: int = 0, read_at: str | None = None,
+                                  device: str | None = None) -> bool:
         """Save the reading position, and fold it into the lifetime counters.
 
         `total_pages` (0 = unknown) is what lets a finish be detected; the caller
-        has it cached, this layer doesn't."""
+        has it cached, this layer doesn't. `read_at` is set only for writes queued
+        offline: if it's older than the stored last_read the write is dropped
+        (returns False) — newest wins."""
+        ts = self._norm_ts(read_at)
+        if self._is_stale(series_id, ts):
+            return False
         page_number = max(1, int(page_number))
         row = self.conn.execute(
             "SELECT last_page, status FROM series WHERE id = ?", (series_id,)
@@ -502,18 +576,22 @@ class Database:
         self.conn.execute(
             """
             UPDATE series
-            SET last_read = CURRENT_TIMESTAMP,
+            SET last_read = COALESCE(?, CURRENT_TIMESTAMP),
                 last_chapter = ?,
                 last_page = ?,
                 fresh_chapters = 0,
                 pages_read_total = COALESCE(pages_read_total, 0) + ?,
                 times_completed = COALESCE(times_completed, 0) + ?,
-                status = CASE WHEN ? = 1 THEN 'Completed' ELSE status END
+                last_device = COALESCE(?, last_device),
+                status = CASE WHEN ? = 1 THEN 'Completed'
+                              WHEN status = 'Not Started' THEN 'Reading' ELSE status END
             WHERE id = ?
             """,
-            (chapter_name, page_number, gained, finished, finished, series_id),
+            (ts, chapter_name, page_number, gained, finished, (device or "")[:40] or None,
+             finished, series_id),
         )
         self.conn.commit()
+        return True
 
     def set_fresh_chapters(self, series_id: int, fresh: bool) -> None:
         """Mark/unmark a series as having chapters newer than the reader's
@@ -594,9 +672,15 @@ class Database:
         genre_filter: str | None = None,
         library_id: int | None = None,
         parody_filter: str | None = None,
+        exclude_terms: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         where_parts: list[str] = []
         params: list[Any] = []
+
+        hsql, hparams = self._hidden_sql(exclude_terms)
+        if hsql:
+            where_parts.append(hsql)
+            params.extend(hparams)
 
         if library_id is not None:
             where_parts.append("s.library_id = ?")

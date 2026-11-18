@@ -24,6 +24,7 @@ from pydantic import BaseModel  # noqa: E402
 
 import sqlite3  # noqa: E402
 import threading  # noqa: E402
+import time  # noqa: E402
 import queue  # noqa: E402
 import logging  # noqa: E402
 
@@ -343,7 +344,29 @@ def _warmup_worker() -> None:
 _COVER_PATH_CACHE: dict[int, str] = {}
 
 # On-disk thumbnail cache, kept out of the user's library.
-_THUMB_DIR = Path.home() / ".mangashelf" / "web_thumbs"
+def _resolve_thumb_dir() -> Path:
+    """Where rendered thumbnails are cached. Overridable because this grows without
+    bound (7.7 GB here) and the default sits on the system drive: MANGASHELF_THUMBS_DIR
+    wins, then "thumbsDir" in web_settings.json, else the app-data default.
+
+    Read straight from the settings file rather than through _load_settings(), which
+    is defined further down this module and would not exist yet at import time. Any
+    failure falls back to the default, so a corrupt settings file cannot stop the
+    server from starting."""
+    env = _os.environ.get("MANGASHELF_THUMBS_DIR", "").strip()
+    if env:
+        return Path(env)
+    try:
+        cfg = _json.loads((Path.home() / ".mangashelf" / "web_settings.json").read_text(encoding="utf-8"))
+        custom = str(cfg.get("thumbsDir") or "").strip()
+        if custom:
+            return Path(custom)
+    except Exception:
+        pass
+    return Path.home() / ".mangashelf" / "web_thumbs"
+
+
+_THUMB_DIR = _resolve_thumb_dir()
 _THUMB_DIR.mkdir(parents=True, exist_ok=True)
 _THUMB_WIDTH = 360  # plenty for a library grid cell
 
@@ -423,11 +446,12 @@ def _pil_open_flat(src: Path):
     return im.convert("RGB")
 
 
-def _get_or_make_thumbnail(src: Path) -> Path | None:
+def _get_or_make_thumbnail(src: Path, width: int = _THUMB_WIDTH) -> Path | None:
     """Return a cached downscaled JPEG for `src`, creating it if needed.
 
-    Cache key is source path + mtime + size, so an edited/replaced page busts it.
-    Returns None on any failure so the caller can fall back to the original file.
+    Cache key is source path + mtime + size + width, so an edited/replaced page
+    busts it. Returns None on any failure so the caller can fall back to the
+    original file.
     """
     if not _PIL_OK:
         return None
@@ -437,7 +461,7 @@ def _get_or_make_thumbnail(src: Path) -> Path | None:
         return None
     import hashlib
 
-    key = f"{src}|{int(st.st_mtime)}|{st.st_size}|{_THUMB_WIDTH}"
+    key = f"{src}|{int(st.st_mtime)}|{st.st_size}|{width}"
     name = hashlib.sha1(key.encode("utf-8", "replace")).hexdigest() + ".jpg"
     thumb_path = _THUMB_DIR / name
     if thumb_path.exists():
@@ -449,8 +473,8 @@ def _get_or_make_thumbnail(src: Path) -> Path | None:
         try:
             im = _pil_open_flat(src)
             w, h = im.size
-            if w > _THUMB_WIDTH:
-                im = im.resize((_THUMB_WIDTH, int(h * _THUMB_WIDTH / w)), Image.LANCZOS)
+            if w > width:
+                im = im.resize((width, int(h * width / w)), Image.LANCZOS)
             im.save(thumb_path, "JPEG", quality=82, optimize=True)
             return thumb_path
         except Exception:
@@ -584,6 +608,9 @@ def _first_valid_cover(folder: str) -> tuple[str | None, Path | None]:
 
 def _prewarm_thumbnails() -> None:
     from concurrent.futures import ThreadPoolExecutor
+    # Wait out the app's own startup: on a cold boot this walks every series
+    # folder, which competes with the disk reads the first screen needs.
+    time.sleep(20)
     rows = _db.get_series_list()
     def _warm_one(row: dict) -> None:
         sid = int(row.get("id", 0))
@@ -600,7 +627,7 @@ def _prewarm_thumbnails() -> None:
         if cover:
             _get_or_make_thumbnail(Path(cover))  # writes to disk if not cached
 
-    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="thumb-warm") as ex:
+    with ThreadPoolExecutor(max_workers=3, thread_name_prefix="thumb-warm") as ex:
         ex.map(_warm_one, rows)
 
 threading.Thread(target=_prewarm_thumbnails, name="thumb-prewarm", daemon=True).start()
@@ -739,6 +766,8 @@ _SETTINGS_DEFAULTS: dict[str, Any] = {
     "hidePrivate": False,        # hide private libraries from the UI (not delete)
     "deleteFromDisk": False,     # pre-check "also delete files" in the delete dialog
     "lastLibraryId": None,
+    "hiddenTags": [],            # user-chosen tag/genre names to keep out of the UI
+    "hideTagged": False,         # master switch: when on, series with a hidden tag vanish
 }
 
 
@@ -755,13 +784,28 @@ def _load_settings() -> dict[str, Any]:
     return merged
 
 
+def _hidden_terms() -> list[str]:
+    """Tag/genre names to filter out right now: the user's list, but only while the
+    hide switch is on (so one tap shows everything again)."""
+    st = _load_settings()
+    return [str(t) for t in (st.get("hiddenTags") or [])] if st.get("hideTagged") else []
+
+
 def _save_settings(patch: dict[str, Any]) -> dict[str, Any]:
     with _SETTINGS_LOCK:
         current = _load_settings()
         # Only accept known keys so the client can't write arbitrary data.
         for k, v in (patch or {}).items():
-            if k in _SETTINGS_DEFAULTS:
-                current[k] = v
+            if k not in _SETTINGS_DEFAULTS:
+                continue
+            if k == "hiddenTags":   # a clean, bounded list of short strings
+                seen: list[str] = []
+                for t in (v if isinstance(v, list) else []):
+                    t = str(t).strip()[:60]
+                    if t and t.lower() not in (x.lower() for x in seen):
+                        seen.append(t)
+                v = seen[:100]
+            current[k] = v
         try:
             tmp = _SETTINGS_PATH.with_suffix(".json.tmp")
             _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -801,6 +845,7 @@ def list_series(
         genre_filter=genre_filter,
         parody_filter=parody_filter,
         library_id=library,
+        exclude_terms=_hidden_terms(),
     )
     missing: list[tuple[int, str]] = []
     with _CACHE_LOCK:
@@ -992,6 +1037,7 @@ def get_cover(series_id: int):
 def get_page(
     path: str = Query(..., description="Page token: an image path, or '<pdf>#<page>'"),
     thumb: int = Query(0, description="1 = return a small thumbnail instead of the full page"),
+    w: int = Query(0, description="Downscale a plain image to this width (offline downloads); 0 = original"),
 ):
     """Stream a single page image. Sandboxed to configured library roots.
     - PDF page tokens ('<file.pdf>#N') are rendered to JPEG on the fly (cached).
@@ -1031,6 +1077,12 @@ def get_page(
         if t is not None:
             return FileResponse(str(t), headers={"Cache-Control": "public, max-age=604800"})
 
+    # Reduced-width copy for offline downloads (bounded so it can't be abused).
+    if 400 <= w <= 4000 and p.suffix.lower() not in _PSD_EXTS:
+        t = _get_or_make_thumbnail(p, w)
+        if t is not None:
+            return FileResponse(str(t), headers={"Cache-Control": "public, max-age=604800"})
+
     if p.suffix.lower() in _PSD_EXTS:
         # Browsers can't render PSD — convert to JPEG in memory and stream it.
         if not _PIL_OK:
@@ -1063,7 +1115,7 @@ def get_page(
 def get_facets(library: int | None = None) -> dict[str, Any]:
     """Distinct values for the library filter dropdowns and search panel, scoped
     to the active library so a public library never shows another's tags/genres."""
-    items = _db.get_series_list(library_id=library)
+    items = _db.get_series_list(library_id=library, exclude_terms=_hidden_terms())
     series_names = sorted(
         {
             str(x.get("series_name") or "").strip()
@@ -1143,13 +1195,14 @@ def profile() -> dict[str, Any]:
     Honours the app's hidePrivate setting, so a private library stays out of the
     numbers exactly as it stays out of the library list."""
     hide_private = bool(_load_settings().get("hidePrivate"))
-    rows = _db.reading_stats(hide_private)
-    libraries = _db.reading_stats_by_library(hide_private)
+    hidden = _hidden_terms()
+    rows = _db.reading_stats(hide_private, hidden)
+    libraries = _db.reading_stats_by_library(hide_private, hidden)
     by_status = {str(r["status"] or "Not Started"): r for r in rows}
 
     def _shelf(statuses: list[str], limit: int) -> list[dict[str, Any]]:
         out = []
-        for r in _db.recent_series(statuses, limit, hide_private):
+        for r in _db.recent_series(statuses, limit, hide_private, hidden):
             sid = int(r["id"])
             out.append({
                 "id": sid,
@@ -1208,6 +1261,23 @@ def profile() -> dict[str, Any]:
 class ProgressIn(BaseModel):
     chapter_name: str
     page: int
+    read_at: str | None = None   # set only for writes replayed from the offline queue
+    device: str | None = None
+
+
+def _mirror_status(series_id: int, old: str | None = None) -> None:
+    """Write the DB status into metadata.json. Without this a rescan re-reads the
+    stale sidecar status and silently reverts it (Reading -> Not Started)."""
+    row = _db.get_series_by_id(series_id)
+    if not row or row.get("status") == old:
+        return
+    try:
+        from sidecar import write_sidecar
+        folder = str(row.get("folder_path") or "").strip()
+        if folder:
+            write_sidecar(folder, {"title": row.get("title") or Path(folder).name, "status": row["status"]})
+    except Exception:
+        pass
 
 
 @app.post("/api/series/{series_id}/progress", dependencies=[Depends(require_token)])
@@ -1221,8 +1291,15 @@ def save_progress(series_id: int, body: ProgressIn) -> dict[str, Any]:
     # progress still saves, only the auto-complete waits for the count to warm up.
     with _CACHE_LOCK:
         total_pages = int(_PAGE_COUNTS.get(str(series_id)) or 0)
-    _db.update_last_read_progress(series_id, body.chapter_name, body.page, total_pages)
-    return {"ok": True, "series_id": series_id, "chapter": body.chapter_name, "page": body.page}
+    if not total_pages and body.read_at:
+        # A synced offline finish usually lands on a cold cache; compute the total
+        # so the crossing of the last page still marks the series Completed.
+        total_pages = _series_total_pages(_chapters_payload(str(data["folder_path"])))
+    applied = _db.update_last_read_progress(
+        series_id, body.chapter_name, body.page, total_pages, body.read_at, body.device)
+    _mirror_status(series_id, data.get("status"))
+    return {"ok": True, "applied": applied, "series_id": series_id,
+            "chapter": body.chapter_name, "page": body.page}
 
 
 class FavoriteIn(BaseModel):
@@ -1240,6 +1317,7 @@ def set_favorite(series_id: int, body: FavoriteIn) -> dict[str, Any]:
 
 class StatusIn(BaseModel):
     status: str
+    read_at: str | None = None
 
 
 @app.post("/api/series/{series_id}/status", dependencies=[Depends(require_token)])
@@ -1247,8 +1325,9 @@ def set_status(series_id: int, body: StatusIn) -> dict[str, Any]:
     data = _db.get_series_by_id(series_id)
     if not data:
         raise HTTPException(status_code=404, detail="Series not found")
-    _db.set_status(series_id, body.status)
-    return {"ok": True, "status": body.status}
+    applied = _db.set_status(series_id, body.status, body.read_at)
+    _mirror_status(series_id)
+    return {"ok": True, "applied": applied, "status": body.status}
 
 
 class MetadataIn(BaseModel):
@@ -1412,62 +1491,85 @@ def split_chapter(series_id: int, body: SplitChapterIn) -> dict[str, Any]:
             detail="Cannot split at the first or last page of a chapter",
         )
 
-    # The chapter being split must be a real direct subfolder of the series root.
-    # (We only touch THIS chapter's folder — other chapters keep their names.)
+    # The chapter being split must be a real folder somewhere at-or-under the
+    # series root (chapters nested under a volume folder are common — see
+    # find_chapter_dirs). We only touch THIS chapter's folder — other chapters
+    # keep their names.
     root_resolved = root.resolve()
     current_dir = Path(str(chapter.path))
     try:
+        current_resolved = current_dir.resolve()
         if (not current_dir.exists() or not current_dir.is_dir()
-                or current_dir.resolve().parent != root_resolved):
+                or (current_resolved != root_resolved
+                    and root_resolved not in current_resolved.parents)):
             raise HTTPException(
                 status_code=400,
-                detail="Chapter splitting requires the chapter to be a direct subfolder of the series root",
+                detail="Chapter splitting requires the chapter to be a folder under the series root",
             )
     except OSError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
-    # Build a new sibling folder name derived from the chapter being split, so we
-    # NEVER rename/clobber other chapters' folders (preserving their custom names).
-    # e.g. "Chap 003 - The Reveal" -> "Chap 003 - The Reveal (part 2)".
-    base = current_dir.name
-    candidate = f"{base} (part 2)"
-    new_dir = root / _sanitize_name(candidate)
-    attempt = 2
-    while new_dir.exists():
-        attempt += 1
-        new_dir = root / _sanitize_name(f"{base} (part {attempt})")
+    # A series with no chapter subfolders at all has its images sitting loose
+    # directly in the series root (detect_series's implicit "Chapter 1" — see
+    # scanner.py). There, current_dir IS the root: neither half can stay loose,
+    # since a scan only treats root-level images as a chapter when NO chapter
+    # subfolder exists. Splitting must move BOTH halves into real subfolders.
+    at_root = current_resolved == root_resolved
+    parent_dir = root if at_root else current_dir.parent
 
-    # Move pages from split_pos+1 onward into the new folder. Track every move so
-    # we can fully roll back (and remove the new dir) if any step fails.
+    def _unique(name: str) -> Path:
+        candidate = parent_dir / _sanitize_name(name)
+        attempt = 1
+        while candidate.exists():
+            attempt += 1
+            candidate = parent_dir / _sanitize_name(f"{name} ({attempt})")
+        return candidate
+
+    base = current_dir.name
+    part1_dir = _unique(base) if at_root else current_dir
+    part2_dir = _unique(f"{base} (part 2)")
+
+    # Move pages into their destination folder. Track every move so we can fully
+    # roll back (and remove any newly-created dirs) if any step fails.
     done: list[tuple[Path, Path]] = []  # (dst, src) pairs already moved
+    made_dirs: list[Path] = []
     try:
-        new_dir.mkdir(parents=False, exist_ok=False)
-        for img_path in chapter.images[split_pos + 1:]:
+        if at_root:
+            part1_dir.mkdir(parents=False, exist_ok=False)
+            made_dirs.append(part1_dir)
+        part2_dir.mkdir(parents=False, exist_ok=False)
+        made_dirs.append(part2_dir)
+        for i, img_path in enumerate(chapter.images):
+            dest_dir = part1_dir if i <= split_pos else part2_dir
+            if dest_dir is current_dir:
+                continue  # already in place (non-root case, first half stays put)
             src = current_dir / Path(str(img_path)).name
             if not src.exists():
                 continue
-            dst = new_dir / src.name
+            dst = dest_dir / src.name
             if dst.exists():
                 stem, suffix, n = dst.stem, dst.suffix, 1
                 while dst.exists():
-                    dst = new_dir / f"{stem}_{n}{suffix}"
+                    dst = dest_dir / f"{stem}_{n}{suffix}"
                     n += 1
             src.rename(dst)
             done.append((dst, src))
     except Exception as exc:
-        # Roll back: move every already-relocated file back, then drop the new dir.
+        # Roll back: move every already-relocated file back, then drop new dirs.
         for dst, src in reversed(done):
             try:
                 if dst.exists() and not src.exists():
                     dst.rename(src)
             except OSError:
                 pass
-        try:
-            if new_dir.exists() and not any(new_dir.iterdir()):
-                new_dir.rmdir()
-        except OSError:
-            pass
+        for made in reversed(made_dirs):
+            try:
+                if made.exists() and not any(made.iterdir()):
+                    made.rmdir()
+            except OSError:
+                pass
         raise HTTPException(status_code=500, detail=f"Split failed (rolled back): {exc}")
+    new_dir = part2_dir
 
     # Invalidate the cached page count so the library reflects the new structure.
     with _CACHE_LOCK:

@@ -77,7 +77,15 @@ def _download(url: str, dest: Path, headers: dict[str, str]) -> int:
     for attempt in range(_RETRIES):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": _UA, **headers})
-            with urllib.request.urlopen(req, timeout=60) as r:
+            try:
+                resp = urllib.request.urlopen(req, timeout=60)
+            except urllib.error.HTTPError as he:
+                # Some CDNs 403 a hotlink Referer instead of requiring one; retry bare.
+                if he.code != 403 or not headers:
+                    raise
+                resp = urllib.request.urlopen(
+                    urllib.request.Request(url, headers={"User-Agent": _UA}), timeout=60)
+            with resp as r:
                 # Read at most the cap + 1 byte: if the response overflows, it's a
                 # bad/hostile URL — bail instead of buffering gigabytes into memory.
                 data = r.read(_MAX_PAGE_BYTES + 1)
@@ -132,6 +140,15 @@ def download_series(
     failed_pages = 0
     failed_chapters = 0
     for ci, ch in enumerate(meta.chapters, 1):
+        ch_dir = series_dir / _chapter_folder(ch, ci)
+        # ponytail: a chapter folder with any file on disk is assumed complete —
+        # skip its page-list fetch entirely so re-sync only hits the network for
+        # new chapters, not every chapter already downloaded. Repairing a chapter
+        # that partially failed needs a manual re-download (delete the folder).
+        if ch_dir.is_dir() and any(ch_dir.iterdir()):
+            if progress:
+                progress(ci, total_ch, _chapter_folder(ch, ci), new_pages)
+            continue
         try:
             pages = source.fetch_pages(ch)
         except Exception as exc:  # noqa: BLE001
@@ -140,7 +157,12 @@ def download_series(
             if progress:
                 progress(ci, total_ch, _chapter_folder(ch, ci), new_pages)
             continue
-        ch_dir = series_dir / _chapter_folder(ch, ci)
+        if not pages:   # a chapter with no readable pages is a failure, not a clean success
+            print(f"[downloader] chapter {ch.number or ci}: no pages found")
+            failed_chapters += 1
+            if progress:
+                progress(ci, total_ch, _chapter_folder(ch, ci), new_pages)
+            continue
         ch_dir.mkdir(exist_ok=True)
 
         def _one(item):

@@ -116,10 +116,38 @@ def _enqueue_job(kind: str, **fields: Any) -> dict[str, Any]:
     return job
 
 
+def _refresh_tags(job: dict[str, Any]) -> None:
+    """Metadata-only refresh: pull the source's current genres/tags for one series and
+    merge them into the DB and the sidecar (so a later rescan keeps them). Nothing is
+    downloaded and nothing the user added by hand is removed."""
+    from sidecar import read_sidecar, write_sidecar
+    src = find_by_name(job["source"])
+    if not src:
+        raise ValueError(f"The source adapter for '{job['source']}' isn't available.")
+    _job_set(job, message="Reading tags…")
+    try:
+        meta = src.fetch_series(job["url"], chapters=False)
+    except TypeError:                       # adapter without the metadata-only mode
+        meta = src.fetch_series(job["url"])
+    folder = job["folder"]
+    sc = read_sidecar(folder) or {}
+    tags = sorted({*map(str, sc.get("tags") or []), *map(str, meta.tags or [])})
+    genres = sorted({*map(str, sc.get("genres") or []), *map(str, meta.genres or [])})
+    write_sidecar(folder, {"title": sc.get("title") or Path(folder).name, "tags": tags, "genres": genres})
+    sid = api._db.series_id_for_folder(folder)
+    if sid:
+        api._db.sync_series_from_sidecar(sid, {"tags": tags, "genres": genres})
+    job["done_message"] = f"{len(tags)} tags."
+
+
 def _execute_job(job: dict[str, Any], scan_and_sync) -> None:
     def progress(done_ch: int, total_ch: int, label: str, new_pages: int) -> None:
         _job_set(job, chapter=done_ch, total=total_ch, pages=new_pages,
                  message=f"{label}  ({done_ch}/{total_ch})")
+
+    if job["kind"] == "tags":
+        _refresh_tags(job)
+        return
 
     if job["kind"] == "resync":
         src = find_by_name(job["source"])
@@ -497,6 +525,30 @@ def resync_series(series_id: int) -> dict[str, Any]:
     with _JOB_LOCK:
         queued = sum(1 for j in _JOBS if j["status"] == "queued")
     return {"ok": True, "id": job["id"], "queued": queued}
+
+
+@router.post("/api/refresh-tags", dependencies=[Depends(require_token)])
+def refresh_tags(library: int | None = None) -> dict[str, Any]:
+    """Queue a metadata-only tag refresh for every imported series with a known
+    origin. Series saved before the source's rating/extra tags were imported pick
+    them up here. One light request per series; no chapters are downloaded."""
+    rows = api._db.get_series_list(library_id=library)
+    with _JOB_LOCK:
+        pending_folders = {str(j.get("folder") or "")
+                           for j in _JOBS if j["status"] in ("queued", "running")}
+    queued = skipped = 0
+    for data in rows:
+        info = source_info(str(data.get("external_id") or ""))
+        folder = str(data.get("folder_path") or "")
+        if (not info or not info.get("url") or not find_by_name(info["source"])
+                or not folder or folder in pending_folders or not Path(folder).is_dir()):
+            skipped += 1
+            continue
+        _enqueue_job("tags", url=info["url"], source=info["source"],
+                     library_id=data.get("library_id"), folder=folder,
+                     title=data.get("title") or "")
+        queued += 1
+    return {"ok": True, "queued": queued, "skipped": skipped}
 
 
 @router.post("/api/resync-all", dependencies=[Depends(require_token)])

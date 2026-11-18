@@ -1,0 +1,23 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>MangaShelf</title>
+<meta name="color-scheme" content="dark">
+<style>
+  html,body{height:100%;margin:0;background:#0b0b10;color:#8a8a99;font:15px system-ui,sans-serif}
+  body{display:grid;place-items:center}
+  b{color:#e8e8ee;font-size:22px;font-weight:600;letter-spacing:.02em}
+</style>
+<div><b>MangaShelf</b><br><span id="m">Starting…</span></div>
+<script>
+// Opened by MangaShelf-app.ps1 straight away so the window shows while the
+// server cold-starts. Polls the server, then hands over to the real app.
+const t0 = Date.now();
+(function poll() {
+  fetch("http://127.0.0.1:8000/api/health", { mode: "no-cors", cache: "no-store" })
+    .then(() => location.replace("http://localhost:8000/"))
+    .catch(() => {
+      if (Date.now() - t0 > 90000) document.getElementById("m").textContent = "Server did not start.";
+      else setTimeout(poll, 150);
+    });
+})();
+</script>

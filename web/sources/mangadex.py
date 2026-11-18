@@ -18,10 +18,10 @@ from .base import ChapterMeta, MangaSource, SearchResult, SeriesMeta
 
 _API = "https://api.mangadex.org"
 
-# MangaDex filters every search and feed to safe/suggestive/erotica unless the
-# request names the ratings itself. Omitting them is not "no filter": an adult
-# title then resolves its metadata normally (fetched by id, unfiltered) while its
-# chapter feed comes back empty, so the import offers "0 chapters" with no error.
+# Every search and feed must name the content ratings it wants: omitting them is
+# not "no filter" — the API applies a narrower default. A title then resolves its
+# metadata normally (fetched by id, unfiltered) while its chapter feed comes back
+# empty, so the import offers "0 chapters" with no error.
 _RATINGS = ("safe", "suggestive", "erotica", "pornographic")
 _RATING_QS = "&".join(f"contentRating[]={r}" for r in _RATINGS)
 _UPLOADS = "https://uploads.mangadex.org"
@@ -206,7 +206,8 @@ class MangaDexSource(MangaSource):
         except Exception:
             return -1
 
-    def fetch_series(self, url: str) -> SeriesMeta:
+    def fetch_series(self, url: str, chapters: bool = True) -> SeriesMeta:
+        """`chapters=False` skips the (paged) chapter feed: one request, metadata only."""
         m = _UUID_RE.search(url)
         if not m:
             raise ValueError("Not a MangaDex title URL (expected /title/<uuid>).")
@@ -218,12 +219,20 @@ class MangaDexSource(MangaSource):
 
         title = _first_localized(attr.get("title", {})) or "Untitled"
         description = _first_localized(attr.get("description", {}))
-        genres = [
-            _first_localized(t["attributes"]["name"])
-            for t in attr.get("tags", [])
-            if t.get("attributes", {}).get("group") in ("genre", "theme")
-        ]
-        genres = [g for g in genres if g]
+        # Genres/themes become genres; every other tag group (content, format, …)
+        # is kept as a plain tag so nothing the site reports is dropped. The site's
+        # own rating label is kept too, so it can be filtered like any other tag.
+        genres: list[str] = []
+        tags: list[str] = []
+        for t in attr.get("tags", []):
+            ta = t.get("attributes", {}) or {}
+            name = _first_localized(ta.get("name", {}))
+            if not name:
+                continue
+            (genres if ta.get("group") in ("genre", "theme") else tags).append(name)
+        rating = str(attr.get("contentRating") or "").strip()
+        if rating:
+            tags.append(rating.title())
 
         author = ""
         cover_file = ""
@@ -236,7 +245,7 @@ class MangaDexSource(MangaSource):
                 cover_file = ra.get("fileName", "") or cover_file
 
         cover_url = f"{_UPLOADS}/covers/{mid}/{cover_file}" if cover_file else ""
-        chapters = self._fetch_feed(mid)
+        chapter_list = self._fetch_feed(mid) if chapters else []
 
         return SeriesMeta(
             source=self.name,
@@ -244,9 +253,10 @@ class MangaDexSource(MangaSource):
             title=title,
             author=author,
             genres=genres,
+            tags=tags,
             description=description,
             cover_url=cover_url,
-            chapters=chapters,
+            chapters=chapter_list,
         )
 
     def _fetch_feed(self, mid: str, lang: str = "en") -> list[ChapterMeta]:

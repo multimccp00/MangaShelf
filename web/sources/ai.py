@@ -82,7 +82,7 @@ def _pick_model(chat: list[str]) -> str:
             if m.lower().startswith(want):
                 return m
         print(f"[sources] MANGASHELF_LLM_MODEL={want!r} not loaded; auto-picking instead")
-    for kw in ("coder", "code", "instruct"):
+    for kw in ("coder", "gemma3", "qwen2.5-abl", "code", "instruct"):
         for m in chat:
             if kw in m.lower():
                 return m
@@ -149,7 +149,12 @@ def _llm_json(system: str, user: str, max_tokens: int = 800) -> dict:
     m = re.search(r"\{.*\}", text, re.S)   # first JSON object in the reply
     if not m:
         raise ValueError(f"LLM did not return JSON: {text[:200]}")
-    return json.loads(m.group(0))
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        # LLMs emit regexes like "\d+" with a bare backslash — invalid JSON escape.
+        # Double any backslash not starting a valid escape, then retry.
+        return json.loads(re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", m.group(0)))
 
 
 # --- headless browser (per-thread, lazy) ------------------------------------
@@ -207,6 +212,7 @@ def _render(url: str, scroll: bool = False) -> dict:
     br = _browser()
     ctx = br.new_context(user_agent=_UA)
     page = ctx.new_page()
+    collected: dict[str, None] = {}
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=45000)
         page.wait_for_timeout(2000)
@@ -216,17 +222,27 @@ def _render(url: str, scroll: bool = False) -> dict:
             # per chapter whether or not the site lazy-loads at all. Sites that put
             # every page URL in the DOM up front (most of them) now exit after two
             # rounds; genuinely lazy ones still get the full budget.
-            count_js = ("Array.from(document.images).flatMap(e => [e.currentSrc, "
-                        "e.getAttribute('src'), e.getAttribute('data-src'), "
-                        "e.getAttribute('data-original'), e.getAttribute('data-lazy-src')])"
-                        ".filter(Boolean).length")
+            img_js = ("Array.from(document.images).flatMap(e => [e.currentSrc, "
+                      "e.getAttribute('src'), e.getAttribute('data-src'), "
+                      "e.getAttribute('data-original'), e.getAttribute('data-lazy-src')])"
+                      ".filter(Boolean)")
+            # Some readers scroll an inner element (e.g. <main>), not the window, and
+            # may unload off-screen images — so also scroll those containers and
+            # accumulate URLs as we go instead of reading the DOM once at the end.
+            inner_js = ("Array.from(document.querySelectorAll('*')).filter(e => "
+                        "e.scrollHeight > e.clientHeight + 50 && "
+                        "/auto|scroll/.test(getComputedStyle(e).overflowY))"
+                        ".forEach(e => e.scrollBy(0, 2400))")
+            page.mouse.move(400, 300)   # wheel events go to the element under the cursor
             stable, last = 0, -1
-            for _ in range(24):
-                found = page.evaluate(count_js)
+            for _ in range(120):
+                collected.update(dict.fromkeys(page.evaluate(img_js)))
+                found = len(collected)
                 stable = stable + 1 if found == last else 0
                 last = found
-                if stable >= 2:
+                if stable >= 3:
                     break
+                page.evaluate(inner_js)
                 page.mouse.wheel(0, 2400)
                 page.wait_for_timeout(250)
             page.wait_for_timeout(400)
@@ -247,7 +263,7 @@ def _render(url: str, scroll: bool = False) -> dict:
     finally:
         page.close()
         ctx.close()
-    return {"links": links, "imgs": list(dict.fromkeys(imgs)), "title": title, "h1": h1}
+    return {"links": links, "imgs": list(dict.fromkeys([*collected, *imgs])), "title": title, "h1": h1}
 
 
 # --- rule cache -------------------------------------------------------------
@@ -301,6 +317,25 @@ def _dominant_image_host(imgs: list[str]) -> str | None:
         return None
     host, n = Counter(hosts).most_common(1)[0]
     return host if n >= 3 else None   # a real run of pages, not a stray icon
+
+
+def _rotating_host_rule(imgs: list[str]) -> str | None:
+    """Regex for sites that serve pages from MANY rotating CDN hosts under one fixed
+    path (https://cdn1.a.site/hi/<token>, https://cdn2.b.site/hi/<token>, ...).
+    A single-host rule can't express that, and an LLM tends to overfit the tokens."""
+    from collections import defaultdict
+    groups: dict[str, list[str]] = defaultdict(list)
+    for u in imgs:
+        p = urlparse(u)
+        seg = p.path.strip("/").split("/")[0] if p.path.count("/") >= 2 else ""
+        if seg and p.netloc:
+            groups[seg].append(p.netloc)
+    if not groups:
+        return None
+    seg, hosts = max(groups.items(), key=lambda kv: len(kv[1]))
+    if len(hosts) >= 8 and len(set(hosts)) >= 4:   # a real run of pages across hosts
+        return rf"^https?://[^/]+/{re.escape(seg)}/[^/?#]+$"
+    return None
 
 
 def _norm_url(u: str) -> str:
@@ -364,7 +399,9 @@ class GenericAISource(MangaSource):
         # Catch-all fallback: only when a local LLM is available AND the URL points
         # at a PUBLIC host (SSRF guard — never fetch internal/localhost/LAN targets).
         # Registered last, so dedicated adapters always win.
-        return url.startswith("http") and llm_available() and _is_public_url(url)
+        # A domain with learned rules cached needs no LLM to be read again.
+        return (url.startswith("http") and _is_public_url(url)
+                and (bool(_load_rules(urlparse(url).netloc)) or llm_available()))
 
     def image_headers(self) -> dict[str, str]:
         # Many manga CDNs 403 a hotlinked image without a Referer from the origin
@@ -502,8 +539,11 @@ class GenericAISource(MangaSource):
         # even when the middle path varies. Fall back to the LLM for odd sites.
         if "image_host" not in rules and "image_regex" not in rules:
             sample = _render(chapter_metas[0].id, scroll=True)
-            host = _dominant_image_host(sample["imgs"])
-            if host:
+            rot = _rotating_host_rule(sample["imgs"])
+            host = None if rot else _dominant_image_host(sample["imgs"])
+            if rot:
+                rules["image_regex"] = rot
+            elif host:
                 rules["image_host"] = host
             else:
                 img_lines = "\n".join(sample["imgs"])[:6000]

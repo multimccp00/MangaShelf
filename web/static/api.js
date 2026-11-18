@@ -261,6 +261,8 @@ const Settings = {
   showSwitcher: loadSettings().showSwitcher !== false,      // default on
   hidePrivate: loadSettings().hidePrivate === true,         // default off
   deleteFromDisk: loadSettings().deleteFromDisk === true,   // default off
+  hiddenTags: Array.isArray(loadSettings().hiddenTags) ? loadSettings().hiddenTags : [],
+  hideTagged: loadSettings().hideTagged === true,           // default off
   lastLibraryId: loadSettings().lastLibraryId ?? null,
 
   _snapshot() {
@@ -270,20 +272,25 @@ const Settings = {
       showSwitcher: this.showSwitcher,
       hidePrivate: this.hidePrivate,
       deleteFromDisk: this.deleteFromDisk,
+      hiddenTags: this.hiddenTags,
+      hideTagged: this.hideTagged,
       lastLibraryId: this.lastLibraryId,
     };
   },
   // Apply a patch locally, cache it, and persist to the server (fire-and-forget).
+  // Returns the save promise, so callers that filter server-side (hidden tags)
+  // can wait for it before re-fetching the library.
   set(patch) {
     Object.assign(this, patch);
     saveSettings(this._snapshot());          // local cache
     try {
-      fetch(`${API}/settings`, {
+      return fetch(`${API}/settings`, {
         method: "POST",
         headers: authHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(patch),
       }).catch((e) => console.warn("[mangashelf] settings save failed:", e));
     } catch (e) { console.warn("[mangashelf] settings save failed:", e); }
+    return Promise.resolve();
   },
   // Pull authoritative settings from the server at startup.
   async loadFromServer() {
@@ -295,6 +302,8 @@ const Settings = {
         if (s.showSwitcher != null) this.showSwitcher = !!s.showSwitcher;
         if (s.hidePrivate != null) this.hidePrivate = !!s.hidePrivate;
         if (s.deleteFromDisk != null) this.deleteFromDisk = !!s.deleteFromDisk;
+        if (Array.isArray(s.hiddenTags)) this.hiddenTags = s.hiddenTags;
+        if (s.hideTagged != null) this.hideTagged = !!s.hideTagged;
         if (s.lastLibraryId !== undefined) this.lastLibraryId = s.lastLibraryId;
         saveSettings(this._snapshot());       // refresh the local cache
       }
@@ -310,6 +319,89 @@ function setActiveLibrary(id) {
   _activeLibraryId = id == null ? null : Number(id);
   Settings.set({ lastLibraryId: _activeLibraryId });
 }
+
+// ---- offline write queue ------------------------------------------------------
+// Reading progress / status writes that can't reach the server (phone offline) are
+// kept in localStorage and replayed IN ORDER when it's back. Each carries the time
+// it happened (read_at) so the server can drop a write older than what it has.
+const SyncQueue = {
+  KEY: "ms_sync_queue",
+  _busy: false,
+  device() {
+    try {
+      const saved = localStorage.getItem("ms_device");
+      if (saved) return saved;
+    } catch (e) {}
+    const ua = navigator.userAgent;
+    if (/iPhone|iPad/.test(ua)) return "iPhone/iPad";
+    if (/Android/.test(ua)) return "Android phone";
+    if (/Mac/.test(ua)) return "Mac";
+    return "Windows PC";
+  },
+  load() {
+    try { return JSON.parse(localStorage.getItem(this.KEY) || "[]"); } catch (e) { return []; }
+  },
+  save(q) {
+    try { localStorage.setItem(this.KEY, JSON.stringify(q)); } catch (e) {}
+    window.dispatchEvent(new CustomEvent("ms-sync", { detail: { pending: q.length } }));
+  },
+  pending() { return this.load().length; },
+  enqueue(type, id, body) {
+    const q = this.load();
+    const op = { type, id, body: { ...body, read_at: new Date().toISOString() } };
+    const last = q[q.length - 1];
+    // Page turns for the same series collapse to the latest position; status
+    // changes are kept so their order relative to progress is preserved.
+    if (type === "progress" && last && last.type === "progress" && last.id === id) q[q.length - 1] = op;
+    else q.push(op);
+    this.save(q);
+  },
+  async _send(op) {
+    const res = await fetch(`${API}/series/${op.id}/${op.type}`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(op.body),
+    });
+    if (res.status === 401) { handleAuthFailure(); throw new Error("401"); }
+    return res;
+  },
+  // Write now if possible; otherwise queue. Never rejects on a network failure.
+  async write(type, id, body) {
+    if (this.pending() === 0 && navigator.onLine !== false) {
+      try {
+        const res = await this._send({ type, id, body });
+        if (!res.ok) throw new Error(`${res.status}`);
+        return res.json();
+      } catch (e) {
+        if (!(e instanceof TypeError)) throw e;   // real HTTP/auth error: surface it
+      }
+    }
+    this.enqueue(type, id, body);
+    this.flush();
+    return { queued: true };
+  },
+  async flush() {
+    if (this._busy || navigator.onLine === false) return;
+    this._busy = true;
+    let sent = 0;
+    try {
+      for (;;) {
+        const q = this.load();
+        if (!q.length) break;
+        let res;
+        try { res = await this._send(q[0]); } catch (e) { break; }   // still offline
+        if (res.status >= 500) break;                                // server unhappy: retry later
+        // 2xx applied, 4xx can never succeed (series deleted…): drop either way.
+        const rest = this.load(); rest.shift(); this.save(rest);
+        sent++;
+      }
+    } finally { this._busy = false; }
+    if (sent) window.dispatchEvent(new CustomEvent("ms-synced", { detail: { sent } }));
+  },
+};
+window.addEventListener("online", () => SyncQueue.flush());
+setInterval(() => { if (SyncQueue.pending()) SyncQueue.flush(); }, 30000);
+setTimeout(() => SyncQueue.flush(), 1500);
 
 const ApiClient = {
   // --- auth ---
@@ -376,14 +468,16 @@ const ApiClient = {
     return fetch(`${API}/libraries/${id}`, { method: "DELETE", headers: authHeaders() })
       .then((r) => { if (!r.ok) return r.json().then((b) => { throw new Error(b.detail || r.status); }); return r.json(); });
   },
+  // Progress + status writes go through SyncQueue so they survive being offline.
   saveProgress(id, chapterName, page) {
-    return postJSON(`${API}/series/${id}/progress`, { chapter_name: chapterName, page });
+    if (window.Offline) window.Offline.onProgress(id, chapterName, page);
+    return SyncQueue.write("progress", id, { chapter_name: chapterName, page, device: SyncQueue.device() });
   },
   setFavorite(id, favorite) {
     return postJSON(`${API}/series/${id}/favorite`, { favorite });
   },
   setStatus(id, status) {
-    return postJSON(`${API}/series/${id}/status`, { status });
+    return SyncQueue.write("status", id, { status });
   },
   // Partial metadata update — pass only the fields you want to change.
   saveMetadata(id, fields) {
@@ -527,6 +621,11 @@ const ApiClient = {
   resyncSeries(id) {
     return postJSON(`${API}/series/${id}/resync`, {});
   },
+  // Metadata-only refresh of genres/tags from each series' origin (no downloads).
+  refreshTags() {
+    const lib = window.getActiveLibrary ? window.getActiveLibrary() : null;
+    return postJSON(`${API}/refresh-tags${lib != null ? `?library=${lib}` : ""}`, {});
+  },
   // Queue a re-sync for EVERY imported series in the active library ("check all
   // for new chapters"). Same shared queue/status endpoint as single re-syncs.
   resyncAll() {
@@ -575,4 +674,5 @@ Object.assign(window, {
   authToken,
   setAuthToken,
   clearAuthToken,
+  SyncQueue,
 });

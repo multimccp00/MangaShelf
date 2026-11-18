@@ -250,6 +250,15 @@ function App() {
   // settings list and the move dialog (data untouched — just not shown), so the
   // app can be handed to someone without private content being reachable.
   const [hidePrivate, setHidePrivate] = useState(window.Settings.hidePrivate);
+  // Tag filter: the list lives in settings; the switch hides/shows matching series.
+  const [hideTagged, setHideTagged] = useState(window.Settings.hideTagged);
+  const [hiddenCount, setHiddenCount] = useState((window.Settings.hiddenTags || []).length);
+  async function applyTagFilter(patch) {
+    await window.Settings.set(patch);
+    setHideTagged(window.Settings.hideTagged);
+    setHiddenCount((window.Settings.hiddenTags || []).length);
+    await reload();
+  }
   const visibleLibraries = hidePrivate ? libraries.filter((l) => !l.private) : libraries;
   // Auth gate: when the server requires a password, the page boots WITHOUT a
   // token. We show a login screen until the user logs in (or a previously stored
@@ -273,9 +282,38 @@ function App() {
       window.STORE.loaded = true;
       setLoaded(true);
       setTick((n) => n + 1);
+      setLoadError(null);
     } catch (e) {
-      setLoadError(String(e));
+      // Offline: if nothing is loaded yet, fill Home/Library with the series saved
+      // on this device. Otherwise keep what's already showing.
+      if (!window.STORE.loaded && await showDeviceCopy()) return;
+      // Offline (e.g. closing the reader on a plane) isn't an error worth a banner.
+      if (navigator.onLine !== false) setLoadError(String(e));
     }
+  }
+
+  // Server unreachable: build the library from series saved on this device.
+  // (STORE.loaded stays false so coming back online re-runs init().)
+  // Status/progress come from the copy cached at download time, plus anything
+  // you did offline since (still queued, so it syncs when you're back).
+  async function showDeviceCopy() {
+    const rows = window.Offline ? await window.Offline.rows() : [];
+    if (!rows.length) return false;
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    for (const op of window.SyncQueue.load()) {
+      const r = byId[op.id];
+      if (!r) continue;
+      if (op.type === "status") r.status = op.body.status;
+      else if (op.type === "progress") {
+        r.last_page = op.body.page; r.last_chapter = op.body.chapter_name; r.last_read = op.body.read_at;
+        if (!r.status || r.status === "Not Started" || r.status === "Planned to Read") r.status = "Reading";
+      }
+    }
+    window.STORE.items = rows.map(window.normalize);
+    setLoaded(true);
+    setTick((n) => n + 1);
+    setLoadError(null);
+    return true;
   }
 
   // Switch the active library: set it, persist, then reload the data for it.
@@ -290,11 +328,17 @@ function App() {
   // last-used one (per the startMode setting). Then load its data.
   async function init() {
     try {
+      // With a VPN up and no network, requests can hang instead of failing, so the
+      // fallback below would never run. Ask the 3-second reachability probe first.
+      if (window.Offline && window.Offline.supported && window.Offline.probe &&
+          !(await window.Offline.probe()) && await showDeviceCopy()) return;
       // Pull authoritative settings from the server first so the startup choice
       // (default vs last-used) reflects saved preferences, not stale cache.
       await window.Settings.loadFromServer();
       setShowSwitcher(window.Settings.showSwitcher);
       setHidePrivate(window.Settings.hidePrivate);
+      setHideTagged(window.Settings.hideTagged);
+      setHiddenCount((window.Settings.hiddenTags || []).length);
       const libs = await window.ApiClient.listLibraries();
       setLibraries(libs);
       let target = null;
@@ -314,7 +358,11 @@ function App() {
       }
       await reload();
     } catch (e) {
-      setLoadError(String(e));
+      // Can't reach the server but chapters are saved on this device: show them
+      // in Home/Library instead of an error, so offline reading just works.
+      if (!(await showDeviceCopy())) {
+        setLoadError(String(e));
+      }
     }
   }
 
@@ -372,6 +420,17 @@ function App() {
       init();
     })();
   }, []);
+
+  // Connection came back after booting offline: load the real library, and after
+  // queued reading progress syncs, refresh so statuses reflect it.
+  useEffect(() => {
+    const onOnline = () => { if (!window.STORE.loaded && needsLogin === false && (!window.Offline || window.Offline.reachable !== false)) init(); };
+    const onSynced = () => reload();
+    window.addEventListener("online", onOnline);
+    window.addEventListener("ms-offline", onOnline);   // reachability probe flipped
+    window.addEventListener("ms-synced", onSynced);
+    return () => { window.removeEventListener("online", onOnline); window.removeEventListener("ms-offline", onOnline); window.removeEventListener("ms-synced", onSynced); };
+  }, [needsLogin]);
 
   // Called by the login screen once a password is accepted (token now stored).
   function onLoggedIn() {
@@ -462,7 +521,7 @@ function App() {
   // restore the scroll position we left from (handled by the effect below).
   function goBackToLibrary() {
     setTick((n) => n + 1);
-    setScreen(detailOrigin === "landing" ? "landing" : "library");
+    setScreen(detailOrigin === "landing" || detailOrigin === "downloaded" ? detailOrigin : "library");
     // Don't scrollTop() — the restore effect puts us back where we were.
   }
 
@@ -475,9 +534,23 @@ function App() {
     return <LoginScreen onLoggedIn={onLoggedIn} />;
   }
 
+  // One-tap switch for the hidden-tags filter (only when some tags are listed).
+  const tagFilterBtn = hiddenCount > 0 ? (
+    <button className={"btn ghost sm tag-filter-btn" + (hideTagged ? " on" : "")}
+      title={hideTagged ? "Hidden tags are filtered out — click to show everything" : "Everything is showing — click to filter hidden tags"}
+      aria-pressed={hideTagged}
+      onClick={() => applyTagFilter({ hideTagged: !hideTagged })}>
+      {hideTagged ? <window.IconEyeOff size={13} /> : <window.IconEye size={13} />} {hideTagged ? "Filter on" : "Filter off"}
+    </button>
+  ) : null;
+
   return (
     <div className={"app" + (t.grain ? " grain" : "")}>
+      <div className="off-fixed">
+        {screen === "landing" && tagFilterBtn}
+      </div>
       <main className="workspace">
+        {window.OfflinePills && <window.OfflinePills />}
         {/* The landing screen has its own centered search and nav, so the topbar
             is redundant there — only show it on the other screens. */}
         {screen !== "landing" && (
@@ -486,6 +559,9 @@ function App() {
               <button className="btn ghost sm" style={screen === "landing" ? { background: "var(--ink-2)", color: "white" } : {}} onClick={() => setScreen("landing")}>Home</button>
               <button className="btn ghost sm" style={screen === "library" ? { background: "var(--ink-2)", color: "white" } : {}} onClick={() => setScreen("library")}>Library</button>
               <button className="btn ghost sm" onClick={() => { window.STORE._favOnly = true; setScreen("library"); }}>Favorites</button>
+              {window.Offline && window.Offline.supported && (
+                <button className="btn ghost sm" style={screen === "downloaded" ? { background: "var(--ink-2)", color: "white" } : {}} onClick={() => setScreen("downloaded")}>Downloaded</button>
+              )}
             </div>
 
             {/* Flexible spacers center the search bar (stretch on both sides). */}
@@ -510,6 +586,7 @@ function App() {
                     r.queued ? "ok" : "info"))
                   .catch((e) => window.toast(`Sync failed: ${e.message || e}`, "error"));
               }}><window.IconCycle size={13} /> Sync</button>
+            {tagFilterBtn}
             <button className="btn ghost sm settings-btn" title="Settings & libraries"
               onClick={() => setSettingsOpen(true)}><window.IconGear size={13} /> Settings</button>
             {/* "From link" button removed — importing by URL still works by pasting
@@ -542,6 +619,9 @@ function App() {
                 }
               }}
             />
+          )}
+          {loaded && screen === "downloaded" && (
+            <window.Downloaded onOpenSeries={openDetail} onBack={window.STORE.loaded ? () => setScreen("library") : null} />
           )}
           {loaded && screen === "detail" && detail && (
             <window.Detail
@@ -625,6 +705,8 @@ function App() {
           onSwitch={(id) => { setSettingsOpen(false); switchLibrary(id); }}
           onShowSwitcher={setShowSwitcher}
           hidePrivate={hidePrivate}
+          onTagFilter={applyTagFilter}
+          hideTagged={hideTagged}
           onHidePrivate={(v) => {
             setHidePrivate(v);
             // Turning it ON while INSIDE a private library would leave hidden
@@ -849,6 +931,7 @@ function Toggle({ checked, onChange }) {
     </button>
   );
 }
+window.Toggle = Toggle;   // reused by the Offline settings (separate bundle scope)
 
 // ---------------------------------------------------------------------------
 // Floating progress indicator for a background job (import / re-sync / move).
@@ -856,7 +939,7 @@ function Toggle({ checked, onChange }) {
 // while a long download or move runs. Dismissing only hides it — the server keeps
 // working — but we keep it up until the job finishes so you don't lose track.
 function BackgroundJob({ kind, title, status, titlesById, onDismiss, onCancel }) {
-  const label = kind === "move" ? "Moving" : kind === "resync" ? "Updating" : "Importing";
+  const label = kind === "move" ? "Moving" : kind === "resync" ? "Updating" : kind === "tags" ? "Refreshing tags" : "Importing";
   const error = status && status.error;
   const warning = status && status.warning;   // finished, but some pages failed
   const total = status ? (status.total || 0) : 0;
@@ -1058,11 +1141,12 @@ function SourceExtensionsModal({ onClose }) {
 
 // ---------------------------------------------------------------------------
 // Settings + library management modal.
-function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged, onSwitch, onShowSwitcher, hidePrivate: hidePrivateProp, onHidePrivate }) {
+function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged, onSwitch, onShowSwitcher, hidePrivate: hidePrivateProp, onHidePrivate, onTagFilter, hideTagged: hideTaggedProp }) {
   const [startMode, setStartMode] = useState(window.Settings.startMode);
   const [confirmPrivate, setConfirmPrivate] = useState(window.Settings.confirmPrivate);
   const [showSwitcher, setShowSwitcher] = useState(window.Settings.showSwitcher);
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);      // "Refresh tags" request in flight
   const [rescanningId, setRescanningId] = useState(null);   // library id currently rescanning
   // Which library row has its actions expanded (mobile — see the breakpoint CSS).
   // One at a time keeps the list scannable.
@@ -1219,6 +1303,11 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
           {extOpen && <SourceExtensionsModal onClose={() => setExtOpen(false)} />}
 
           <div className="settings-section">
+            <div className="settings-section-title">Offline reading</div>
+            {window.OfflineSettings && <window.OfflineSettings />}
+          </div>
+
+          <div className="settings-section">
             <div className="settings-section-title">On startup, open</div>
             <label className="settings-radio">
               <input type="radio" name="startmode" checked={startMode === "default"} onChange={() => setStart("default")} />
@@ -1228,6 +1317,40 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
               <input type="radio" name="startmode" checked={startMode === "last"} onChange={() => setStart("last")} />
               <span><b>The last library I used</b><br /><span className="settings-radio-hint">Convenient, but may reopen private content where you left off.</span></span>
             </label>
+          </div>
+
+          <div className="settings-section">
+            <div className="settings-section-title">Hidden tags</div>
+            <div className="settings-section-hint">Series that carry any of these tags or genres are kept out of the library, search, filters and profile while the switch is on. Nothing is deleted.</div>
+            <div className="settings-toggle-row">
+              <div className="settings-toggle-label">
+                <div>Hide these tags</div>
+                <div className="settings-toggle-hint">Also available as the eye button in the top bar, for a quick switch in public.</div>
+              </div>
+              <Toggle checked={!!hideTaggedProp} onChange={(v) => onTagFilter({ hideTagged: v })} />
+            </div>
+            <div className="settings-toggle-row">
+              <div className="settings-toggle-label">
+                <div>Refresh tags from the source</div>
+                <div className="settings-toggle-hint">Series saved earlier may be missing tags the site has since added, so they can't be hidden yet. This reads each one's tags again (one quick request each, nothing is downloaded).</div>
+              </div>
+              <button className="btn ghost sm" disabled={refreshing} onClick={() => {
+                setRefreshing(true);
+                window.ApiClient.refreshTags()
+                  .then((r) => window.toast(r.queued ? `Refreshing tags for ${r.queued} series…` : "Nothing to refresh."))
+                  .catch((e) => window.toast(e.message || "Couldn't start the refresh."))
+                  .finally(() => setRefreshing(false));
+              }}>{refreshing ? "Starting…" : "Refresh tags"}</button>
+            </div>
+            <div className="settings-hidden-tags">
+              <window.TokenEditor
+                values={window.Settings.hiddenTags || []}
+                counts={window.STORE.facets.tag_counts || {}}
+                suggestions={[...(window.STORE.facets.tags || []), ...(window.STORE.facets.genres || [])]}
+                addLabel="Add tag"
+                onChange={(arr) => onTagFilter({ hiddenTags: arr })}
+              />
+            </div>
           </div>
 
           <div className="settings-section">

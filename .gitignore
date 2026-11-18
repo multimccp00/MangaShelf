@@ -20,3 +20,6 @@ __pycache__/
 /PORTFOLIO.md
 /portfolio-shots/
 /*.png
+
+# Tablet flashing files (firmware/recovery) — local only
+/tablet-flash/
