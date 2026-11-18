@@ -32,7 +32,7 @@ function _libViewFor(libId) {
 }
 
 // Landing — centered search, Continue Reading rail, New Reads rail.
-function Landing({ onOpenDetail, onOpenSearch, onImportLink, onBrowse, density }) {
+function Landing({ filterBtn, onOpenDetail, onOpenSearch, onImportLink, onBrowse, density }) {
   const [q, setQ] = useStateScr("");
   const [delTick, setDelTick] = useStateScr(0);   // bump to re-render after a delete
   const items = window.STORE.items;
@@ -82,6 +82,7 @@ function Landing({ onOpenDetail, onOpenSearch, onImportLink, onBrowse, density }
         />
         <button className="btn primary" type="submit">Search</button>
       </form>
+      {filterBtn && <div className="landing-filter">{filterBtn}</div>}
 
       <section className="landing-section">
         <h2 className="landing-h">Continue Reading</h2>

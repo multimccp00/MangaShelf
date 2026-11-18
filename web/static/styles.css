@@ -5063,5 +5063,5 @@ textarea.detail-field-input {
 /* Hidden-tags filter: top-bar switch + the list editor in Settings. */
 .tag-filter-btn { white-space: nowrap; flex-shrink: 0; }
 .tag-filter-btn.on { color: var(--text); border-color: rgba(239, 59, 59, 0.45); background: rgba(239, 59, 59, 0.12); }
-.off-fixed .tag-filter-btn { background: var(--ink-1); border-color: var(--ink-3); }
+.landing-filter { display: flex; justify-content: center; margin-top: -38px; }
 .settings-hidden-tags { padding: 4px 0 2px; }

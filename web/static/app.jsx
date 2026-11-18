@@ -537,18 +537,15 @@ function App() {
   // One-tap switch for the hidden-tags filter (only when some tags are listed).
   const tagFilterBtn = hiddenCount > 0 ? (
     <button className={"btn ghost sm tag-filter-btn" + (hideTagged ? " on" : "")}
-      title={hideTagged ? "Hidden tags are filtered out — click to show everything" : "Everything is showing — click to filter hidden tags"}
+      title={hideTagged ? "Series with your hidden tags are filtered out. Click to show everything." : "Everything is showing. Click to hide series with your hidden tags."}
       aria-pressed={hideTagged}
       onClick={() => applyTagFilter({ hideTagged: !hideTagged })}>
-      {hideTagged ? <window.IconEyeOff size={13} /> : <window.IconEye size={13} />} {hideTagged ? "Filter on" : "Filter off"}
+      {hideTagged ? <window.IconEyeOff size={13} /> : <window.IconEye size={13} />} {hideTagged ? "Hiding tagged" : "Showing all"}
     </button>
   ) : null;
 
   return (
     <div className={"app" + (t.grain ? " grain" : "")}>
-      <div className="off-fixed">
-        {screen === "landing" && tagFilterBtn}
-      </div>
       <main className="workspace">
         {window.OfflinePills && <window.OfflinePills />}
         {/* The landing screen has its own centered search and nav, so the topbar
@@ -602,7 +599,7 @@ function App() {
             <div className="empty"><p>Loading library…</p></div>
           )}
           {loaded && screen === "landing" && (
-            <window.Landing tick={tick} onOpenDetail={openDetail} onOpenSearch={openSearch} onImportLink={openAddLink} onBrowse={() => { setScreen("library"); scrollTop(); }} density={t.density} />
+            <window.Landing filterBtn={tagFilterBtn} tick={tick} onOpenDetail={openDetail} onOpenSearch={openSearch} onImportLink={openAddLink} onBrowse={() => { setScreen("library"); scrollTop(); }} density={t.density} />
           )}
           {loaded && screen === "library" && (
             <window.Library onOpenDetail={openDetail} onOpenSearch={openSearch} density={t.density} setDensity={(d) => setTweak("density", d)} />
