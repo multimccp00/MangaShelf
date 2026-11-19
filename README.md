@@ -1,10 +1,15 @@
 # MangaShelf
 
-Self-hosted web app that turns folders of manga/comics on disk into a searchable, taggable library you can browse and read from any device, with pluggable importers for new series from online sources.
+Self-hosted web app that turns folders of manga/comics on disk into a searchable, taggable library you can browse and read from any device — including offline — with pluggable importers for new series from online sources.
 
-- **Backend:** FastAPI app in `web/api.py`, SQLite (`database.py`), folder scanner (`scanner.py`), PDF support, reading lists
-- **Frontend:** React, in `web/`
-- **Features:** faceted search (genres, tags, authors, language, status), ratings/favorites, metadata and cover editing, in-browser reader (vertical + right-to-left) with progress tracking
+- **Backend:** FastAPI app in `web/api.py` (routers in `web/routes/`), SQLite (`database.py`), folder scanner (`scanner.py`), PDF support, reading lists
+- **Frontend:** React (JSX, bundled with esbuild — `cd web && npm run build`), in `web/static/`
+- **Library & reader:** faceted search (genres, tags, authors, language, status), ratings/favorites, metadata and cover editing, in-browser reader (vertical + right-to-left) with progress tracking, a Profile screen with reading stats
+- **Importing:** MangaDex and AniList adapters, safe declarative JSON source extensions, optional AI fallback; imports run in a persistent server-side queue
+- **Offline reading:** save series or individual chapters for offline use (service worker + Cache Storage), "keep the next N chapters", and offline progress that syncs back when you reconnect (newest write wins). In the Android wrapper app, downloads can be stored on an SD card.
+- **Hidden tags:** define your own list of tags to hide, with a one-tap Hiding/Showing switch; tags can be refreshed from the source for the whole library
+- **Devices:** responsive on phone, tablet and desktop; installable as a PWA; reachable from other devices over Tailscale
+- **Tests:** `python -m pytest tests`
 - Config lives in `~/.mangashelf/config.json`. Remote access: see `REMOTE_ACCESS.md`. Longer write-up: `PORTFOLIO.md`.
 
 ---
