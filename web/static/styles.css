@@ -5064,4 +5064,16 @@ textarea.detail-field-input {
 .tag-filter-btn { white-space: nowrap; flex-shrink: 0; }
 .tag-filter-btn.on { color: var(--text); border-color: rgba(239, 59, 59, 0.45); background: rgba(239, 59, 59, 0.12); }
 .landing-filter { display: flex; justify-content: center; margin-top: -38px; }
+/* Tablet / small laptop: the nav + five buttons are wider than the screen, so the
+   toggle and Settings fell off the right edge. Same layout as phones: search on
+   its own row, buttons wrap instead of clipping. */
+@media (max-width: 1240px) and (min-width: 641px) {
+  .topbar { height: auto; min-height: 56px; padding: 8px 16px; gap: 8px; flex-wrap: wrap; }
+  .topbar-spacer { display: none; }
+  .topbar .search { flex: 1 1 100% !important; order: 3; max-width: none; }
+  .topbar .refresh-btn { margin-left: auto; }
+}
+@media (max-width: 900px) and (min-width: 641px) {
+  .rescan-btn { display: none; }   /* same call the phone layout makes; keeps Settings on the first row */
+}
 .settings-hidden-tags { padding: 4px 0 2px; }
