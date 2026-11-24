@@ -637,24 +637,32 @@ def idle_seconds() -> float:
     try:
         info = _LASTINPUTINFO()
         info.cbSize = ctypes.sizeof(info)
+        k32 = ctypes.windll.kernel32
+        k32.GetTickCount.restype = ctypes.c_uint32   # default c_int goes negative after ~25 days of uptime
         if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
-            return (ctypes.windll.kernel32.GetTickCount() - info.dwTime) / 1000.0
+            return ((k32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0   # both wrap at 49.7 days
     except Exception:
         pass
     return 0.0
 
 
-def gpu_busy(threshold: int = 75) -> bool:   # an animated wallpaper alone holds ~40%
-    """Something else (a game) is using the GPU. Checked only before a chapter,
-    while our own model isn't loaded. Gamepad input doesn't count as "input" for
-    idle_seconds(), so this is what keeps a controller game from being interrupted."""
-    try:
-        out = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=5,
-                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
-        return int(out.strip().splitlines()[0]) >= threshold
-    except Exception:
-        return False
+def gpu_busy(threshold: int = 75, samples: int = 5) -> bool:   # an animated wallpaper alone holds ~20-40%
+    """Something else (a game) is using the GPU: the median of a few readings a
+    second apart is over `threshold` (one reading spikes to 65% on video/wallpaper).
+    Only meaningful while our own model is NOT running. Gamepad input doesn't count as
+    "input" for idle_seconds(), so this is what keeps a controller game from being interrupted."""
+    vals = []
+    for i in range(samples):
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                                 capture_output=True, text=True, timeout=5,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+            vals.append(int(out.strip().splitlines()[0]))
+        except Exception:
+            return False
+        if i + 1 < samples:
+            time.sleep(1)
+    return sorted(vals)[len(vals) // 2] >= threshold
 
 
 if __name__ == "__main__":   # self-check: python translate.py <page image> <lang>

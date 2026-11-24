@@ -100,9 +100,20 @@ class LlamaServer:
         except Exception:
             return False
 
+    @staticmethod
+    def _kill_strays() -> None:
+        """A llama-server left by a previous (killed) worker still holds ~20 GB of
+        RAM and the port; we can't stop it through self.proc, so end it by name."""
+        import subprocess
+        subprocess.run(["taskkill", "/F", "/IM", Path(LlamaServer.EXE).name],
+                       capture_output=True, creationflags=0x08000000)
+
     def start(self) -> None:
         if self.proc and self.proc.poll() is None:
             return
+        if self.up():
+            self._kill_strays()
+            time.sleep(3)
         import subprocess
         log(f"starting llama-server ({Path(self.gguf).name})")
         port = mt.LLAMACPP.rsplit(":", 1)[1]
@@ -127,6 +138,9 @@ class LlamaServer:
             log("stopping llama-server (PC in use)")
             self.proc.terminate()
             self.proc.wait(timeout=60)
+        elif self.proc is None and self.up():
+            log("stopping a leftover llama-server (PC in use)")
+            self._kill_strays()
         self.proc = None
 
 
@@ -137,7 +151,12 @@ def wait_idle(idle_min: int) -> None:
     announced = False
     while True:
         idle = mt.idle_seconds()
-        if idle >= idle_min * 60 and not mt.gpu_busy() and not server_busy():
+        # Our own llama-server keeps the GPU busy between batches: only check the
+        # GPU (for a game) before our model is loaded, or it would stop itself.
+        ours = bool(LLAMA and LLAMA.proc and LLAMA.proc.poll() is None)
+        if idle >= idle_min * 60 and not server_busy() and (ours or not mt.gpu_busy()):
+            if announced:
+                log(f"PC idle {int(idle)}s: working")
             if LLAMA:
                 LLAMA.start()
             return
