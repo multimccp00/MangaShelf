@@ -92,7 +92,7 @@ function ProfileCover({ item, onOpen, sub }) {
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}
       role="button"
       tabIndex={0}
-      aria-label={item.title}
+      aria-label={item.displayTitle || item.title}
     >
       <div className="rail-card-cover">
         {failed ? (
@@ -117,7 +117,7 @@ function ProfileCover({ item, onOpen, sub }) {
             "--strip-bg": "linear-gradient(180deg, rgba(11,11,16,0.78), rgba(11,11,16,0.86))",
           }}
         >
-          <div className="rail-card-title">{item.title}</div>
+          <div className="rail-card-title">{item.displayTitle || item.title}</div>
           <div className="rail-card-sub">{sub(item)}</div>
         </div>
       </div>

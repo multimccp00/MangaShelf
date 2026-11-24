@@ -46,6 +46,16 @@ function glyphFor(title) {
 }
 
 // Turn a raw DB row (from /api/series) into the item shape screens consume.
+// First saved English name that isn't just a piece of the title ("1LDK+JK").
+// Names after the "—" marker are other-language names: searchable, never shown.
+function englishName(row) {
+  const title = String(row.title || "").toLowerCase();
+  const lines = String(row.alt_titles || "").split("\n").map((t) => t.trim());
+  const cut = lines.indexOf("—");
+  return (cut >= 0 ? lines.slice(0, cut) : lines)
+    .find((t) => t && !title.includes(t.toLowerCase())) || "";
+}
+
 function normalize(row) {
   const total = Number(row.total_pages ?? row.pages ?? 0);
   const read = Number(row.last_page ?? row.read ?? 0);
@@ -55,6 +65,11 @@ function normalize(row) {
     id: row.id,
     library_id: row.library_id != null ? row.library_id : null,
     title: row.title || "Untitled",
+    // English name saved at import (first alt title). Shown in place of a romaji /
+    // pinyin title; `title` stays the real (folder) title for renames and edits.
+    title_en: englishName(row),
+    alt_titles: row.alt_titles || "",   // every saved name, for search
+    displayTitle: englishName(row) || row.title || "Untitled",
     author: row.author || "",
     series: row.series_name || row.series || "",
     status,
@@ -190,8 +205,29 @@ function authHeaders(base) {
   const h = base || {};
   const tok = authToken();
   if (tok) h["X-Mangashelf-Token"] = tok;
+  if (_pubIp) h["X-Public-IP"] = _pubIp;   // lets the server tell home from away
   return h;
 }
+
+// This device's public IP, so the server can tell whether we're on the home internet
+// (the PC compares it to its own). One tiny lookup at boot, redone when the network
+// changes; if the address changed the page reloads so the lock state is re-evaluated.
+let _pubIp = "";
+async function resolvePublicIp() {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 3000);
+    const r = await fetch("https://api4.ipify.org", { signal: ctl.signal, cache: "no-store" });
+    clearTimeout(t);
+    const ip = (await r.text()).trim();
+    if (/^[0-9.]{7,15}$/.test(ip)) { const changed = _pubIp && _pubIp !== ip; _pubIp = ip; return changed; }
+  } catch (_) { /* offline/blocked: stay "unknown" => treated as away */ }
+  return false;
+}
+window.addEventListener("online", async () => { if (await resolvePublicIp()) location.reload(); });
+document.addEventListener("visibilitychange", async () => {
+  if (!document.hidden && await resolvePublicIp()) location.reload();
+});
 
 // A 401 on an authenticated call means our stored token is stale/invalid (e.g. a
 // password was set after we logged in, or the token rotated). Clear it and boot
@@ -263,6 +299,11 @@ const Settings = {
   deleteFromDisk: loadSettings().deleteFromDisk === true,   // default off
   hiddenTags: Array.isArray(loadSettings().hiddenTags) ? loadSettings().hiddenTags : [],
   hideTagged: loadSettings().hideTagged === true,           // default off
+  awayAutoHide: loadSettings().awayAutoHide !== false,      // default on
+  mtAuto: loadSettings().mtAuto !== false,                  // queue raw chapters for translation
+  mtModel: loadSettings().mtModel || "gemma3:12b",
+  mtIdleMinutes: loadSettings().mtIdleMinutes ?? 10,
+  tagsLocked: false,    // server says: away from home, filter forced on (never cached)
   lastLibraryId: loadSettings().lastLibraryId ?? null,
 
   _snapshot() {
@@ -274,6 +315,10 @@ const Settings = {
       deleteFromDisk: this.deleteFromDisk,
       hiddenTags: this.hiddenTags,
       hideTagged: this.hideTagged,
+      awayAutoHide: this.awayAutoHide,
+      mtAuto: this.mtAuto,
+      mtModel: this.mtModel,
+      mtIdleMinutes: this.mtIdleMinutes,
       lastLibraryId: this.lastLibraryId,
     };
   },
@@ -304,6 +349,11 @@ const Settings = {
         if (s.deleteFromDisk != null) this.deleteFromDisk = !!s.deleteFromDisk;
         if (Array.isArray(s.hiddenTags)) this.hiddenTags = s.hiddenTags;
         if (s.hideTagged != null) this.hideTagged = !!s.hideTagged;
+        if (s.awayAutoHide != null) this.awayAutoHide = !!s.awayAutoHide;
+        if (s.mtAuto != null) this.mtAuto = !!s.mtAuto;
+        if (s.mtModel) this.mtModel = s.mtModel;
+        if (s.mtIdleMinutes != null) this.mtIdleMinutes = Number(s.mtIdleMinutes);
+        this.tagsLocked = s.tagsLocked === true;
         if (s.lastLibraryId !== undefined) this.lastLibraryId = s.lastLibraryId;
         saveSettings(this._snapshot());       // refresh the local cache
       }
@@ -626,11 +676,19 @@ const ApiClient = {
     const lib = window.getActiveLibrary ? window.getActiveLibrary() : null;
     return postJSON(`${API}/refresh-tags${lib != null ? `?library=${lib}` : ""}`, {});
   },
-  // Queue a re-sync for EVERY imported series in the active library ("check all
-  // for new chapters"). Same shared queue/status endpoint as single re-syncs.
+  // Queue a re-sync for EVERY imported series in EVERY library ("check all for new
+  // chapters"). Same shared queue/status endpoint as single re-syncs.
   resyncAll() {
-    const lib = window.getActiveLibrary ? window.getActiveLibrary() : null;
-    return postJSON(`${API}/resync-all${lib != null ? `?library=${lib}` : ""}`, {});
+    return postJSON(`${API}/resync-all`, {});
+  },
+  // Machine translation (raw ja/ko/zh chapters -> English text overlay).
+  translateChapter(id, chapter, now) { return postJSON(`${API}/series/${id}/translate`, { chapter, now: !!now }); },
+  translateSeries(id, now) { return postJSON(`${API}/series/${id}/translate`, { now: !!now }); },
+  getTranslation(id, chapter) { return getJSON(`${API}/series/${id}/translation?chapter=${encodeURIComponent(chapter)}`); },
+  translateStatus() { return getJSON(`${API}/translate/status`); },
+  translateModels() { return getJSON(`${API}/translate/models`); },
+  clearTranslateQueue() {
+    return fetch(`${API}/translate/queue`, { method: "DELETE", headers: authHeaders() }).then((r) => r.json());
   },
   // Rename a chapter folder (number + optional title combine into the name).
   renameChapter(id, oldName, number, title) {
@@ -668,6 +726,7 @@ Object.assign(window, {
   STORE,
   normalize,
   Settings,
+  resolvePublicIp,
   getActiveLibrary,
   setActiveLibrary,
   bumpCover,

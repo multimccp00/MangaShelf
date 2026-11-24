@@ -27,6 +27,7 @@ import threading  # noqa: E402
 import time  # noqa: E402
 import queue  # noqa: E402
 import logging  # noqa: E402
+import re  # noqa: E402
 
 _log = logging.getLogger("mangashelf")
 
@@ -164,7 +165,23 @@ def _chapters_payload(series_path: str) -> list[dict[str, Any]]:
 
     chapters = get_series_chapters(series_path)
     out: list[dict[str, Any]] = []
+    # Series-level language (the library's "JP"/"CN"/"KR" column) for chapters that
+    # carry no chapter.json of their own — older imports and local folders.
+    series_lang = ""
+    try:
+        sid = _db.series_id_for_folder(key)
+        row = _db.get_series_by_id(sid) if sid else None
+        from translate import series_language
+        series_lang = series_language(str((row or {}).get("title") or Path(key).name),
+                                      str((row or {}).get("language") or ""))
+    except Exception:
+        pass
     for idx, ch in enumerate(chapters):
+        lang = series_lang
+        try:
+            lang = str(_json.loads((Path(ch.path) / "chapter.json").read_text(encoding="utf-8")).get("language") or "") or series_lang
+        except Exception:
+            pass
         out.append(
             {
                 "index": idx,
@@ -172,6 +189,8 @@ def _chapters_payload(series_path: str) -> list[dict[str, Any]]:
                 "path": ch.path,
                 "page_count": len(ch.images),
                 "pages": ch.images,  # absolute paths; client requests them via /api/page
+                "language": lang,    # "" = unknown (English or local files)
+                "translated": (Path(ch.path) / "translation.en.json").is_file(),
             }
         )
     with _CACHE_LOCK:
@@ -768,7 +787,113 @@ _SETTINGS_DEFAULTS: dict[str, Any] = {
     "lastLibraryId": None,
     "hiddenTags": [],            # user-chosen tag/genre names to keep out of the UI
     "hideTagged": False,         # master switch: when on, series with a hidden tag vanish
+    "awayAutoHide": True,        # away from home (not loopback/LAN), hidden tags stay hidden
+    "mtAuto": True,              # queue raw (ja/ko/zh) chapters for machine translation after import/sync
+    "mtModel": "gemma3:12b",     # Ollama model used for translation
+    "mtIdleMinutes": 10,         # translate only after this long without keyboard/mouse input (0 = always)
 }
+
+# --- "Am I at home?" ----------------------------------------------------------
+# Decided per request from the TCP peer address (never a header, which a client could
+# forge): this PC itself or a private LAN address (192.168/10/172.16, link-local) is
+# home. Anything else — Tailscale (100.64/10), a public IP, unparseable — is away.
+# A device that reaches us over Tailscale (phone, tablet) looks identical at home and
+# away, so it reports its own public IP (X-Public-IP) and is "home" only if that equals
+# this PC's public IP, i.e. it is on the same home internet. No/odd report = away.
+# ponytail: client-reported, so spoofable: a guard against accidents, not an attacker
+# (the token is the real gate). CGNAT ISPs share a public IP, so neighbours would match.
+import contextvars as _contextvars
+import ipaddress as _ipaddress
+
+_AWAY: _contextvars.ContextVar[bool] = _contextvars.ContextVar("mangashelf_away", default=False)
+
+
+_PUB = {"ip": "", "at": 0.0}
+
+
+def _home_public_ip() -> str:
+    """This PC's public IPv4, cached 10 min ("" if the lookup fails, so devices read
+    as away rather than home)."""
+    import time as _time
+    if _time.time() - _PUB["at"] < 600 and _PUB["ip"]:
+        return _PUB["ip"]
+    try:
+        import urllib.request as _ur
+        with _ur.urlopen("https://api4.ipify.org", timeout=3) as r:
+            ip = r.read().decode().strip()
+        _ipaddress.ip_address(ip)
+        _PUB.update(ip=ip, at=_time.time())
+    except Exception:
+        _PUB["at"] = _time.time() - 540     # retry in a minute, not on every request
+    return _PUB["ip"]
+
+
+def _is_home_ip(host: str, reported: str = "") -> bool:
+    try:
+        ip = _ipaddress.ip_address((host or "").split("%")[0])
+    except ValueError:
+        return False
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    if ip.is_loopback or ip.is_private or ip.is_link_local:
+        return True                      # this PC itself (or an opted-in LAN)
+    # Tailscale device: same public IP as the PC => on the home internet.
+    home = _home_public_ip()
+    return bool(home) and reported.strip() == home
+
+
+# Only this PC and the tailnet may connect, whatever interface the server got bound
+# to (a stray MANGASHELF_HOST=0.0.0.0 would otherwise expose it to the whole LAN).
+# MANGASHELF_ALLOW_LAN=1 opts back in to LAN access.
+_TAILNET = (_ipaddress.ip_network("100.64.0.0/10"), _ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+_ALLOW_LAN = _os.environ.get("MANGASHELF_ALLOW_LAN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _peer_allowed(host: str) -> bool:
+    if host == "testclient":   # Starlette's in-process TestClient; a real socket peer is always an IP
+        return True
+    try:
+        ip = _ipaddress.ip_address((host or "").split("%")[0])
+    except ValueError:
+        return False
+    if getattr(ip, "ipv4_mapped", None):
+        ip = ip.ipv4_mapped
+    if ip.is_loopback or any(ip in net for net in _TAILNET):
+        return True
+    return _ALLOW_LAN and (ip.is_private or ip.is_link_local)
+
+
+class _HomeNetMiddleware:
+    """Pure-ASGI (not BaseHTTPMiddleware) so the contextvar reaches sync endpoints."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        peer = (scope.get("client") or ("", 0))[0]
+        if not _peer_allowed(peer):
+            if scope["type"] == "http":
+                await send({"type": "http.response.start", "status": 403,
+                            "headers": [(b"content-type", b"text/plain")]})
+                await send({"type": "http.response.body", "body": b"Tailscale only."})
+            else:
+                await send({"type": "websocket.close", "code": 1008})
+            return
+        reported = next((v.decode("latin-1") for k, v in scope.get("headers", [])
+                         if k == b"x-public-ip"), "")
+        token = _AWAY.set(not _is_home_ip(peer, reported))
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _AWAY.reset(token)
+
+
+def _tags_locked(st: dict[str, Any] | None = None) -> bool:
+    """True when this request comes from away AND auto-hide is on: the filter is
+    forced on and the client may not turn it off."""
+    st = st or _load_settings()
+    return bool(_AWAY.get() and st.get("awayAutoHide", True) and st.get("hiddenTags"))
 
 
 def _load_settings() -> dict[str, Any]:
@@ -788,7 +913,8 @@ def _hidden_terms() -> list[str]:
     """Tag/genre names to filter out right now: the user's list, but only while the
     hide switch is on (so one tap shows everything again)."""
     st = _load_settings()
-    return [str(t) for t in (st.get("hiddenTags") or [])] if st.get("hideTagged") else []
+    on = st.get("hideTagged") or _tags_locked(st)
+    return [str(t) for t in (st.get("hiddenTags") or [])] if on else []
 
 
 def _save_settings(patch: dict[str, Any]) -> dict[str, Any]:
@@ -819,6 +945,7 @@ def _save_settings(patch: dict[str, Any]) -> dict[str, Any]:
 # ------------------------------------------------------------------------- app --
 
 app = FastAPI(title="MangaShelf Web", version="0.1.0")
+app.add_middleware(_HomeNetMiddleware)
 
 
 @app.get("/api/series", dependencies=[Depends(require_token_read)])
@@ -1768,7 +1895,9 @@ from routes.libraries import router as _libraries_router  # noqa: E402
 from routes.settings_auth import router as _settings_auth_router  # noqa: E402
 from routes.sources_ext import router as _sources_ext_router  # noqa: E402
 from routes.jobs import router as _jobs_router  # noqa: E402
+from routes.translate_jobs import router as _translate_router  # noqa: E402
 app.include_router(_libraries_router)
 app.include_router(_settings_auth_router)
 app.include_router(_sources_ext_router)
 app.include_router(_jobs_router)
+app.include_router(_translate_router)

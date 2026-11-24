@@ -2888,6 +2888,9 @@ textarea.detail-field-input {
   color: var(--muted);
   font-family: var(--font-mono);
 }
+.chapter-lang { color: var(--text-2, #c9c9d1); font-weight: 600; }
+.chapter-lang.raw { color: #e0a84a; }        /* untranslated original */
+.chapter-lang.mt { color: var(--vermillion); }  /* unofficial machine translation */
 
 /* Empty state */
 .empty {
@@ -4224,9 +4227,6 @@ textarea.detail-field-input {
   .topbar-spacer { display: none; }
   .topbar .search { flex: 1 1 100% !important; order: 3; }   /* beat the inline flex */
   .topbar .search kbd { display: none; }            /* ⌘K hint is irrelevant on a phone */
-  .topbar .btn.sm { padding: 0 10px; }
-  .rescan-btn { display: none; }                    /* rescan isn't needed on mobile */
-  .refresh-btn { display: none; }                   /* nor manual refresh — pull-to-refresh / reload covers it */
 
   /* More grid columns than desktop would give — phones are portrait, so even
      "spacious" should fit 2–3 covers across. On phones we force an exact column
@@ -4754,7 +4754,8 @@ textarea.detail-field-input {
   left: 0; right: 0; top: 100%;
   height: 12px;
 }
-.bg-job.has-queue:hover .bg-job-queuelist {
+@media (hover: hover) { .bg-job.has-queue:hover .bg-job-queuelist { opacity: 1; visibility: visible; transform: translateY(0); } }
+.bg-job.list-open .bg-job-queuelist {
   opacity: 1;
   visibility: visible;
   transform: translateY(0);
@@ -5061,19 +5062,104 @@ textarea.detail-field-input {
 .off-note { font-size: 12px; color: #f1c83b; padding: 2px 4px 4px; }
 
 /* Hidden-tags filter: top-bar switch + the list editor in Settings. */
-.tag-filter-btn { white-space: nowrap; flex-shrink: 0; }
-.tag-filter-btn.on { color: var(--text); border-color: rgba(239, 59, 59, 0.45); background: rgba(239, 59, 59, 0.12); }
-.landing-filter { display: flex; justify-content: center; margin-top: -38px; }
-/* Tablet / small laptop: the nav + five buttons are wider than the screen, so the
-   toggle and Settings fell off the right edge. Same layout as phones: search on
-   its own row, buttons wrap instead of clipping. */
-@media (max-width: 1240px) and (min-width: 641px) {
-  .topbar { height: auto; min-height: 56px; padding: 8px 16px; gap: 8px; flex-wrap: wrap; }
-  .topbar-spacer { display: none; }
-  .topbar .search { flex: 1 1 100% !important; order: 3; max-width: none; }
-  .topbar .refresh-btn { margin-left: auto; }
+/* ---- Top bar: [section tabs] · search · [filter, more, settings] ----
+   One calm row on desktop and tablet landscape; at <=820px (tablet portrait,
+   phones) the search drops to its own row and the controls stay on the first. */
+.tb-nav { display: flex; gap: 2px; padding: 3px; flex-shrink: 0; background: var(--ink-1); border: 1px solid var(--ink-3); border-radius: 12px; }
+.tb-tab {
+  height: 34px; padding: 0 14px; border: 0; border-radius: 9px; background: transparent;
+  color: var(--text-dim); font: 500 13px var(--font-ui, inherit); white-space: nowrap; cursor: pointer;
+  transition: background 140ms, color 140ms;
 }
-@media (max-width: 900px) and (min-width: 641px) {
-  .rescan-btn { display: none; }   /* same call the phone layout makes; keeps Settings on the first row */
+.tb-tab:hover { background: rgba(255, 255, 255, 0.05); color: var(--text); }
+.tb-tab.on { background: var(--ink-3); color: var(--text); }
+.tb-tools { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.icon-btn.tb-btn { width: 40px; height: 40px; flex-shrink: 0; }
+.icon-btn.tb-btn.on { background: rgba(255, 255, 255, 0.08); border-color: var(--ink-3); color: var(--text); }
+.icon-btn.tb-tags.on { background: rgba(239, 59, 59, 0.12); border-color: rgba(239, 59, 59, 0.45); }
+.tb-more { position: relative; }
+.dd-menu.tb-more-menu { left: auto; right: 0; top: calc(100% + 6px); width: auto; min-width: 220px; }
+.dd-item.tb-more-item { display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 12px; font-size: 13px; }
+@media (max-width: 1240px) {
+  .topbar { height: auto; min-height: 60px; padding: 8px 16px; gap: 10px; }
+  .topbar-spacer { display: none; }
+  .topbar .search { flex: 1 1 200px !important; max-width: none; min-width: 0; }
+  .topbar .search kbd { display: none; }
+}
+@media (max-width: 820px) {
+  .topbar { flex-wrap: wrap; }
+  .topbar .search { flex: 1 1 100% !important; order: 3; }
+  .tb-tools { margin-left: auto; }
+}
+@media (max-width: 640px) {
+  .topbar { padding: 8px 12px; gap: 8px; }
+  .tb-nav { flex: 1 1 0; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .tb-nav::-webkit-scrollbar { display: none; }
+  .tb-tab { padding: 0 10px; font-size: 12.5px; }
+  .tb-tools { margin-left: 0; gap: 0; }
 }
 .settings-hidden-tags { padding: 4px 0 2px; }
+
+/* === Unofficial machine translation (reader overlay) === */
+.mt-wrap { position: relative; }
+.reader-mode-single .mt-wrap,
+.reader-mode-double .mt-wrap { flex: 1 1 0; min-width: 0; width: 100%; height: 100%; }
+.reader-mode-single .mt-wrap img.page-img,
+.reader-mode-double .mt-wrap img.page-img {
+  width: 100% !important; height: 100% !important;
+  max-width: none !important; max-height: none !important; object-fit: contain;
+}
+.reader-mode-vertical .mt-wrap { width: min(900px, 96vw); flex-shrink: 0; }
+.reader-mode-vertical .mt-wrap img.page-img { width: 100%; min-height: 0; }
+.mt-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.mt-box {
+  width: 100%; height: 100%; box-sizing: border-box; padding: 0.15em 0.25em;
+  display: flex; align-items: center; justify-content: center; text-align: center;
+  background: #fff; color: #111;
+  border-radius: 0.6em; font-family: var(--font-ui); font-weight: 600; line-height: 1.15;
+  overflow-wrap: break-word; hyphens: auto; overflow: hidden;
+}
+/* The text is its own element so a long word can break/hyphenate inside a
+   narrow bubble (an anonymous flex item keeps its min-content width and clips). */
+.mt-box > span { min-width: 0; max-width: 100%; overflow-wrap: normal; hyphens: manual; }
+/* Last resort, set by the fitter only when even the smallest size can't hold a word. */
+.mt-box.mt-break > span { overflow-wrap: anywhere; hyphens: auto; }
+/* Inside a painted bubble the white is the bubble itself. */
+.mt-box.mt-in-bubble { background: none; border-radius: 0; padding: 0; }
+/* SFX on the art: lettering with a white outline, the art stays visible. */
+.mt-box.mt-free {
+  background: none; font-weight: 800; color: #111;
+  text-shadow: 0 0 2px #fff, 0 0 2px #fff, 0 0 3px #fff, 1px 1px 0 #fff, -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff;
+}
+/* The "not official" notice: a tag in the top bar's subtitle line, plus a floating
+   pill that only appears when the bars are hidden, so it never covers controls. */
+.mt-tag {
+  display: inline-block; margin-left: 8px; vertical-align: 1px; white-space: nowrap;
+  font-family: var(--font-ui); font-size: 10px; font-weight: 600;
+  color: #f3c77a; border: 1px solid rgba(224, 168, 74, 0.5); border-radius: 999px; padding: 0 7px;
+}
+.mt-banner { display: none; }
+.reader.chrome-hidden .mt-banner {
+  display: block; position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 11;
+  pointer-events: none; white-space: nowrap; opacity: 0.8;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+  color: #f3c77a; background: rgba(20, 16, 8, 0.82);
+  border: 1px solid rgba(224, 168, 74, 0.5); border-radius: 999px; padding: 4px 12px;
+}
+.mt-toggle.on { color: #f3c77a; border-color: rgba(224, 168, 74, 0.55); background: rgba(224, 168, 74, 0.12); }
+
+/* English name first; the original (romaji/pinyin) title stays editable underneath, smaller. */
+.detail-meta-head.has-en .detail-h1.editable,
+.detail-meta-head.has-en .detail-h1-input { font-family: var(--font-ui); font-size: 15px; font-weight: 500; letter-spacing: 0; color: var(--muted); margin-top: 6px; }
+
+/* While an import/update card is showing, give the page room underneath so the
+   card never sits on top of the last buttons (Browse library, Load more…). */
+.app.has-bg-job .content { padding-bottom: 120px; }
+.bg-job-queue { border: 0; font: inherit; font-size: 11px; font-weight: 700; font-family: var(--font-mono); cursor: pointer; min-height: 28px; }
+@media (max-width: 640px) {
+  /* Phone: a slim full-width strip; queue list capped so it can't cover the screen. */
+  .bg-job-stack { left: 10px; right: 84px; bottom: 10px; }   /* clear of the 52px library FAB */
+  .bg-job { width: auto; max-width: none; padding: 10px 12px; }
+  .bg-job-queuelist { width: 100%; max-height: 40vh; }
+  .bg-job-queue { min-height: 36px; min-width: 44px; }
+}

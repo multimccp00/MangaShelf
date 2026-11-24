@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from api import app, WEB_TOKEN, _password_is_set
+from api import app, WEB_TOKEN, _password_is_set, _db
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -173,6 +173,9 @@ def main() -> None:
         pass  # not available in some environments; the graceful path still works
 
     server.run()
+    # Graceful path only (the force-quit handler os._exit()s): closing checkpoints
+    # the WAL so no -wal file is left to recover on next boot.
+    _db.close()
 
 
 if __name__ == "__main__":

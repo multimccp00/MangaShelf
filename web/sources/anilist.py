@@ -187,6 +187,8 @@ class AniListSource(MangaSource):
             source=source_for_pages,
             external_id=external_id,
             title=title,
+            alt_titles=([t["english"]] if t.get("english") and t["english"] != title else [])
+                       + ["—"] + [n for n in (t.get("romaji"), t.get("native")) if n and n != title],
             author=_author_from_staff(media.get("staff", {})),
             genres=[g for g in (media.get("genres", []) or []) if g],
             description=_clean_desc(media.get("description", "")),

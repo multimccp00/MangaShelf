@@ -133,10 +133,14 @@ def _refresh_tags(job: dict[str, Any]) -> None:
     sc = read_sidecar(folder) or {}
     tags = sorted({*map(str, sc.get("tags") or []), *map(str, meta.tags or [])})
     genres = sorted({*map(str, sc.get("genres") or []), *map(str, meta.genres or [])})
-    write_sidecar(folder, {"title": sc.get("title") or Path(folder).name, "tags": tags, "genres": genres})
+    patch = {"tags": tags, "genres": genres}
+    alts = [a for a in (getattr(meta, "alt_titles", None) or []) if a != meta.title]
+    if alts:   # other names (English first) — refreshed here too so search finds them
+        patch["alt_titles"] = alts
+    write_sidecar(folder, {"title": sc.get("title") or Path(folder).name, **patch})
     sid = api._db.series_id_for_folder(folder)
     if sid:
-        api._db.sync_series_from_sidecar(sid, {"tags": tags, "genres": genres})
+        api._db.sync_series_from_sidecar(sid, patch)
     job["done_message"] = f"{len(tags)} tags."
 
 
@@ -225,6 +229,15 @@ def _execute_job(job: dict[str, Any], scan_and_sync) -> None:
     with api._CACHE_LOCK:
         api._COVER_PATH_CACHE.clear()
     api._invalidate_chapters_cache()
+    # Raw (ja/ko/zh) chapters that just arrived go on the idle-time translation queue.
+    if job["kind"] in ("import", "resync") and result.get("series_dir"):
+        try:
+            sid = api._db.series_id_for_folder(result["series_dir"])
+            if sid:
+                from routes.translate_jobs import auto_enqueue
+                auto_enqueue(sid)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[mt] post-import queue step failed: {exc}")
 
 
 def _job_worker() -> None:

@@ -155,7 +155,7 @@ function CoverImg({ item, onLoad }) {
       ref={imgRef}
       className="img cover-img"
       src={window.coverUrl(item)}
-      alt={item.title}
+      alt={item.displayTitle || item.title}
       // Lazy-load + low priority: a big library renders 60 cards at once. Without
       // this the browser fires 60 cover requests immediately, saturating its ~6
       // connections/host — so a getSeries() API call (opening a detail) QUEUES
@@ -250,7 +250,8 @@ function useSeriesActions(item, { onDeleted } = {}) {
     if (e) e.stopPropagation();
     // Doujinshi titles run to 100+ chars; an untruncated one turns the dialog
     // title into a paragraph. The full name stays visible on the card behind it.
-    const shortTitle = item.title.length > 58 ? item.title.slice(0, 58).trimEnd() + "…" : item.title;
+    const shownTitle = item.displayTitle || item.title;
+    const shortTitle = shownTitle.length > 58 ? shownTitle.slice(0, 58).trimEnd() + "…" : shownTitle;
     const res = await window.confirmDialog({
       title: `Remove “${shortTitle}”?`,
       message: "Removes it from the library.",
@@ -562,7 +563,7 @@ function LibraryCard({ item, onOpen, compact, onDeleted }) {
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen?.(item); } }}
       role="button"
       tabIndex={0}
-      aria-label={item.title}
+      aria-label={item.displayTitle || item.title}
     >
       <div className="card-cover" ref={ref}>
         <CoverImg item={item} onLoad={() => setImgReady(true)} />
@@ -570,7 +571,7 @@ function LibraryCard({ item, onOpen, compact, onDeleted }) {
           <div className="missing-badge" title="This folder wasn't found on disk at the last scan">Folder missing</div>
         )}
         <div className="cover-title-overlay" style={stripStyle}>
-          <h3 className="cover-title">{item.title}</h3>
+          <h3 className="cover-title">{item.displayTitle || item.title}</h3>
           {!compact ? (
             <div className="cover-meta">
               <span className="cover-meta-chapters">{window.progressLabel(item)}</span>
@@ -641,14 +642,14 @@ function RailCard({ item, onOpen, onDeleted }) {
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen?.(item); } }}
       role="button"
       tabIndex={0}
-      aria-label={item.title}
+      aria-label={item.displayTitle || item.title}
     >
       <div className="rail-card-cover">
         <CoverImg item={item} onLoad={() => setImgReady(true)} />
         {/* Re-sync found chapters newer than the caught-up read position. */}
         {!!item.fresh_chapters && <span className="rail-card-new">NEW CH</span>}
         <div className="rail-card-overlay" style={stripStyle}>
-          <div className="rail-card-title">{item.title}</div>
+          <div className="rail-card-title">{item.displayTitle || item.title}</div>
           <div className="rail-card-sub cover-meta">
             <span className="cover-meta-chapters">{window.progressLabel(item)}</span>
             {item.author && window.progressLabel(item) ? <span className="sep" /> : null}
@@ -710,12 +711,12 @@ function NewReadsRailCard({ item, onOpen, onStatusChange }) {
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen?.(item); } }}
       role="button"
       tabIndex={0}
-      aria-label={item.title}
+      aria-label={item.displayTitle || item.title}
     >
       <div className="rail-card-cover">
         <CoverImg item={item} onLoad={() => setImgReady(true)} />
         <div className="rail-card-overlay" style={stripStyle}>
-          <div className="rail-card-title">{item.title}</div>
+          <div className="rail-card-title">{item.displayTitle || item.title}</div>
           <div className="rail-card-sub cover-meta">
             <span className="cover-meta-chapters">{window.progressLabel(item) || status}</span>
             {item.author && (window.progressLabel(item) || status) ? <span className="sep" /> : null}

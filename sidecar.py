@@ -54,6 +54,7 @@ def write_sidecar(folder_path: str | Path, data: dict[str, Any]) -> None:
         "notes": str(data.get("notes", existing.get("notes", ""))).strip(),
         "tags": sorted({str(t).strip() for t in data.get("tags", existing.get("tags", [])) if str(t).strip()}),
         "genres": sorted({str(g).strip() for g in data.get("genres", existing.get("genres", [])) if str(g).strip()}),
+        "alt_titles": [a for a in dict.fromkeys(str(x).strip() for x in data.get("alt_titles", existing.get("alt_titles", [])) if str(x).strip())],
         "parodies": sorted({str(p).strip() for p in data.get("parodies", existing.get("parodies", [])) if str(p).strip()}),
         "last_chapter": data.get("last_chapter", existing.get("last_chapter")),
         "last_read": data.get("last_read", existing.get("last_read")),

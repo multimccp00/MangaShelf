@@ -138,6 +138,24 @@ class ScrapePreviewIn(BaseModel):
     url: str
 
 
+_FETCH_DEADLINE = 60   # seconds — total cap per request-thread series fetch
+
+
+def _fetch_series_bounded(src, url: str):
+    """src.fetch_series with an overall deadline. Each urlopen has only a socket
+    timeout, and variant/feed loops multiply it; this keeps a slow source from
+    pinning a request thread. ponytail: the worker thread can't be killed, it
+    finishes in the background — switch to per-call deadlines if that piles up."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as _Timeout
+    ex = ThreadPoolExecutor(max_workers=1)
+    try:
+        return ex.submit(src.fetch_series, url).result(timeout=_FETCH_DEADLINE)
+    except _Timeout:
+        raise TimeoutError(f"source took longer than {_FETCH_DEADLINE}s")
+    finally:
+        ex.shutdown(wait=False)
+
+
 @router.post("/api/scrape/preview", dependencies=[Depends(require_token)])
 def scrape_preview(body: ScrapePreviewIn) -> dict[str, Any]:
     """Resolve a series URL to its metadata + chapter count for confirmation,
@@ -147,7 +165,7 @@ def scrape_preview(body: ScrapePreviewIn) -> dict[str, Any]:
     if not src:
         raise HTTPException(status_code=400, detail="No import source recognizes this link.")
     try:
-        meta = src.fetch_series(url)
+        meta = _fetch_series_bounded(src, url)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Could not read the series: {exc}")
     external_id = f"{meta.source}:{meta.external_id}"
@@ -186,7 +204,7 @@ def preview_series(body: ScrapePreviewIn) -> dict[str, Any]:
     if not src:
         raise HTTPException(status_code=400, detail="No import source recognizes this link.")
     try:
-        meta = src.fetch_series(url)
+        meta = _fetch_series_bounded(src, url)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=502, detail=f"Could not read the series: {exc}")
     external_id = f"{meta.source}:{meta.external_id}"

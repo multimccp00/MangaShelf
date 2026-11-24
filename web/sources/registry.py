@@ -241,12 +241,14 @@ def search_all(query: str, limit: int = 20) -> list[dict[str, object]]:
             # Kept out of the API payload (popped before return) — used only for
             # ranking; a source's own alt-title-aware score beats display-title text.
             "_match_score": getattr(r, "match_score", -1.0),
+            "_alt_titles": list(getattr(r, "alt_titles", None) or []),
         }, rank) for rank, r in enumerate(src.search(query, limit=limit))]
 
     # Collect every source's hits, tagged with the source object (for its priority)
     # and the hit's in-source rank, so the final ordering can be by relevance across
     # sources rather than simply grouping one source after another.
-    scored: list[tuple[float, int, dict[str, object]]] = []
+    scored: list = []
+    known_names: set[str] = set()
     seen_urls: set[str] = set()
     with ThreadPoolExecutor(max_workers=max(1, len(searchable))) as ex:
         futs = {ex.submit(_one, s): s for s in searchable}
@@ -271,7 +273,10 @@ def search_all(query: str, limit: int = 20) -> list[dict[str, object]]:
                     if u:
                         seen_urls.add(u)
                     ms = float(r.pop("_match_score", -1.0))
-                    scored.append((_relevance(query, str(r.get("title", "")), prio, rank, ms), rank, r))
+                    alts = r.pop("_alt_titles", None) or []
+                    if ms >= 1.0:       # exact title hit: its other names identify the work
+                        known_names.update(_norm(a) for a in alts)
+                    scored.append((prio, rank, ms, r))
         except TimeoutError:
             print("[sources] web search hit the overall deadline; returning partial results")
 
@@ -279,8 +284,17 @@ def search_all(query: str, limit: int = 20) -> list[dict[str, object]]:
     # floats to the top no matter which source it came from, with source priority
     # only breaking ties. Higher score first; stable within equal scores. Every hit
     # keeps its per-card source badge so the user still sees (and picks) the source.
-    scored.sort(key=lambda t: t[0], reverse=True)
-    out: list[dict[str, object]] = [r for _score, _rank, r in scored]
+    # Alt-title boost: a hit from a source that can't see alt titles (Weeb Central
+    # lists only "World's End Harem") whose title equals another name of a series the
+    # query matched exactly (MangaDex: "Shuumatsu no Harem") is that series — rank it
+    # as a near-exact match instead of burying it under unrelated prefix matches.
+    ranked = []
+    for prio, rank, ms, r in scored:
+        if ms < 0 and _norm(str(r.get("title", ""))) in known_names:
+            ms = 0.98
+        ranked.append((_relevance(query, str(r.get("title", "")), prio, rank, ms), r))
+    ranked.sort(key=lambda t: t[0], reverse=True)
+    out: list[dict[str, object]] = [r for _score, r in ranked]
 
     # NOTE: we do NOT fetch chapter counts here — resolving them for every result
     # is slow (MangaDex rate-limits the per-result feed calls, adding several

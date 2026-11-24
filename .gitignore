@@ -23,3 +23,6 @@ __pycache__/
 
 # Tablet flashing files (firmware/recovery) — local only
 /tablet-flash/
+
+# Local knowledge-graph output
+/graphify-out/

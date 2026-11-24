@@ -3,12 +3,16 @@
 By default the server binds to **localhost only** — nothing can reach it but this
 PC. There are three ways to open it up, from safest to riskiest.
 
+Whatever the server binds to, it only **answers** requests from this PC and from
+Tailscale addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`); anything else gets
+`403 Tailscale only.` Set `MANGASHELF_ALLOW_LAN=1` to also allow your home LAN.
+
 ## Quick reference
 
 | Where you are | How | Command |
 |---|---|---|
 | Same PC | default | `web\run-web.ps1` |
-| Same Wi-Fi (LAN) | bind to all interfaces | `$env:MANGASHELF_HOST="0.0.0.0"; web\run-web.ps1` |
+| Same Wi-Fi (LAN) | bind to all interfaces + allow LAN | `$env:MANGASHELF_HOST="0.0.0.0"; $env:MANGASHELF_ALLOW_LAN="1"; web\run-web.ps1` |
 | Anywhere (recommended) | Tailscale VPN | `web\run-web-remote.ps1` |
 
 The app's whole API (browsing **and** editing) is gated by a per-install secret
@@ -21,9 +25,10 @@ gets it for free — you never copy a secret by hand.
 
 ## Option A — Same Wi-Fi (LAN)
 
-1. Start with LAN binding:
+1. Start with LAN binding, and allow LAN clients (they're refused by default):
    ```powershell
    $env:MANGASHELF_HOST = "0.0.0.0"
+   $env:MANGASHELF_ALLOW_LAN = "1"
    web\run-web.ps1
    ```
 2. Find this PC's LAN IP:
@@ -88,3 +93,6 @@ but for personal use **Tailscale (Option B) is simpler and safer** — prefer it
   don't post screenshots of it, and keep it on networks/people you trust.
 - To rotate the token, delete `%USERPROFILE%\.mangashelf\web_token.txt` and
   restart; a new one is generated and re-injected on next page load.
+- **Home vs away:** the page reports the device's public IP; if it differs from
+  this PC's, the device is "away" and hidden tags are always hidden there (the
+  switch is locked) when "Always hide when away from home" is on.

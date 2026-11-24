@@ -40,6 +40,13 @@ class SeriesMeta:
     description: str = ""
     cover_url: str = ""
     chapters: list[ChapterMeta] = field(default_factory=list)
+    # Other names, for library search. English names first (the first one is shown
+    # on cards); then ALT_TITLES_SEARCH_ONLY; then every other name (romaji, native
+    # ja/ko/zh…), searchable but never displayed.
+    alt_titles: list[str] = field(default_factory=list)
+
+
+ALT_TITLES_SEARCH_ONLY = "—"
 
 
 @dataclass
@@ -66,6 +73,9 @@ class SearchResult:
     # query against the display title. Set this whenever a source ranks internally
     # against titles other than the one it displays.
     match_score: float = -1.0
+    # Other names this series goes by (English/romaji/native). Used only to rank
+    # combined search: another source's hit titled like one of these is the same work.
+    alt_titles: list[str] = field(default_factory=list)
 
 
 class MangaSource(ABC):

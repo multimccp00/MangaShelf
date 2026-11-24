@@ -6,7 +6,96 @@ const { useState: useStateRdr, useEffect: useEffectRdr, useRef: useRefRdr, useMe
 // every state change — which re-decodes the image AND breaks native dblclick
 // (the browser won't synthesize it when the node under the cursor was replaced
 // between the two clicks).
-function PageImg({ p, flat, mode, previewSource }) {
+// Unofficial machine-translation overlay for one page. An SVG with the page's own
+// pixel size as viewBox letterboxes exactly like the <img> (object-fit: contain),
+// so boxes stored in image pixels land on the right bubbles at any zoom or mode.
+function MtLayer({ mt }) {
+  const W = mt.w, H = mt.h;
+  const ref = useRefRdr(null);
+  // Shrink each box's text until it fits without breaking words (measured after
+  // layout; a dozen boxes x a few steps per page is cheap).
+  useEffectRdr(() => {
+    // Readable floor (~11px on a tablet): below it a word hyphenates instead.
+    const floor = W * 0.016;
+    const over = (el) => el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1;
+    (ref.current ? ref.current.querySelectorAll(".mt-box") : []).forEach((el) => {
+      let fs = parseFloat(el.style.fontSize);
+      el.classList.remove("mt-break");
+      for (let i = 0; i < 30 && fs > floor && over(el); i++) {
+        fs *= 0.9;
+        el.style.fontSize = fs + "px";
+      }
+      // A single word wider than the bubble even at the floor: let it break
+      // (hyphenated) rather than be cut off.
+      if (over(el)) el.classList.add("mt-break");
+    });
+  }, [mt]);
+  return (
+    <svg ref={ref} className="mt-layer" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+      {/* All bubble paint first, then all text: two speeches can share one bubble. */}
+      {mt.boxes.filter((b) => b.en && b.poly).map((b, i) => (
+        <path key={"p" + i} d={"M" + b.poly.map((p) => p.join(",")).join("L") + "Z"} fill="#fff" />
+      ))}
+      {mt.boxes.filter((b) => b.en).map((b, i) => {
+        if (b.poly && b.bubble) {
+          // Paint the bubble's own shape white (hides every original glyph, keeps
+          // the outline), then set the English in the rectangle that fits inside
+          // it: ~70% of the bubble's box, never smaller than the text it held.
+          const [bx, by, bw, bh] = b.bubble;
+          // Tall narrow bubbles (vertical Japanese) are nearly straight-sided:
+          // use almost their full width, or a single English word won't fit.
+          const kx = bh > 1.8 * bw ? 0.06 : 0.15;
+          const ix = bx + bw * kx, iy = by + bh * 0.15;
+          let x = Math.min(ix, b.x), y = Math.min(iy, b.y);
+          let w = Math.max(ix + bw * (1 - 2 * kx), b.x + b.w) - x, h = Math.max(iy + bh * 0.7, b.y + b.h) - y;
+          if (b.area) [x, y, w, h] = b.area;   // one of two speeches sharing a joined bubble
+          const fs = Math.min(W * 0.04, h * 0.45);
+          return (
+            <foreignObject key={i} x={x} y={y} width={w} height={h}>
+              <div className="mt-box mt-in-bubble" style={{ fontSize: fs }} title={b.src} lang="en"><span>{b.en}</span></div>
+            </foreignObject>
+          );
+        }
+        // Vertical CJK columns are tall and narrow: widen a little for English,
+        // but not so much that the box covers the neighbouring bubbles.
+        // `area` = the white space around the text measured on the page (box
+        // can't go past the bubble edge); older files only have the text box.
+        if (b.area) {
+          const [ax, ay, aw, ah] = b.area;
+          return (
+            <foreignObject key={i} x={ax} y={ay - ah * 0.04} width={aw} height={ah * 1.08}>
+              <div className="mt-box" style={{ fontSize: Math.min(W * 0.035, ah * 0.4) }} title={b.src} lang="en"><span>{b.en}</span></div>
+            </foreignObject>
+          );
+        }
+        let w = b.w, h = b.h;
+        if (b.vertical) w = Math.max(w, Math.min(h * 0.55, W * 0.2));
+        const padX = w * 0.1, padY = h * 0.06;
+        w += padX * 2; h += padY * 2;
+        let x = Math.max(0, Math.min(W - w, b.x + b.w / 2 - w / 2));
+        const y = Math.max(0, Math.min(H - h, b.y - padY));
+        // Don't let the widened box spill over a neighbouring bubble's text.
+        let x2 = x + w;
+        mt.boxes.forEach((o) => {
+          if (o === b || o.y >= y + h || o.y + o.h <= y) return;
+          if (o.x >= b.x + b.w && o.x < x2) x2 = Math.max(b.x + b.w, o.x - 2);
+          if (o.x + o.w <= b.x && o.x + o.w > x) x = Math.min(b.x, o.x + o.w + 2);
+        });
+        w = x2 - x;
+        // Sound effects / text on the art: outlined lettering, no box, capped so a
+        // big drawn SFX doesn't turn into a giant slab over the picture.
+        const fs = Math.min(b.free ? W * 0.026 : W * 0.035, h * 0.4);   // the effect shrinks to fit
+        return (
+          <foreignObject key={i} x={x} y={y} width={w} height={h}>
+            <div className={"mt-box" + (b.free ? " mt-free" : "")} style={{ fontSize: fs }} title={b.src} lang="en"><span>{b.en}</span></div>
+          </foreignObject>
+        );
+      })}
+    </svg>
+  );
+}
+
+function PageImg({ p, flat, mode, previewSource, mt }) {
   const f = flat[p - 1];
   if (!f) return null;
   const imgStyle = mode === "vertical"
@@ -18,7 +107,7 @@ function PageImg({ p, flat, mode, previewSource }) {
         objectFit: "contain",
         display: "block",
       };
-  return (
+  const img = (
     <img
       data-page={p}
       className="page-img"
@@ -32,6 +121,8 @@ function PageImg({ p, flat, mode, previewSource }) {
       style={imgStyle}
     />
   );
+  if (!mt) return img;
+  return <div className="mt-wrap">{img}<MtLayer mt={mt} /></div>;
 }
 
 // ====== Reader ======
@@ -112,6 +203,70 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
   const total = flat.length;
   const [page, setPage] = useStateRdr(1);
   const [flipDir, setFlipDir] = useStateRdr(1);   // 1 = forward, -1 = back (for the page-turn animation)
+
+  // ---- unofficial machine translation (raw ja/ko/zh chapters) ----
+  // mtOn = show the English overlay when a chapter has one (remembered per device).
+  const [mtOn, setMtOn] = useStateRdr(() => localStorage.getItem("mangashelf_mt_on") !== "0");
+  const [mtData, setMtData] = useStateRdr({});        // chapterName -> translation | false
+  const [mtPending, setMtPending] = useStateRdr({});  // chapterName -> status message while queued
+  function toggleMt() { const v = !mtOn; setMtOn(v); localStorage.setItem("mangashelf_mt_on", v ? "1" : "0"); }
+  const chapterByName = useMemoRdr(() => {
+    const m = {};
+    (item.chapters || []).forEach((c) => { m[c.name] = c; });
+    return m;
+  }, [item.chapters]);
+  // Load translations for the chapters of the pages on screen.
+  useEffectRdr(() => {
+    if (previewSource || !mtOn || !item.id) return;
+    const names = new Set(flat.slice(Math.max(0, page - 2), page + 2).map((f) => f.chapterName));
+    names.forEach((n) => {
+      const ch = chapterByName[n];
+      if (!ch || !ch.translated || mtData[n] !== undefined) return;
+      setMtData((d) => ({ ...d, [n]: false }));
+      window.ApiClient.getTranslation(item.id, n)
+        .then((t) => setMtData((d) => ({ ...d, [n]: t })))
+        .catch(() => {});
+    });
+  }, [page, flat, mtOn, chapterByName, item.id]);
+  // While a chapter is being translated, poll the queue and pick it up when done.
+  useEffectRdr(() => {
+    const waiting = Object.keys(mtPending);
+    if (!waiting.length) return;
+    const t = setInterval(() => {
+      window.ApiClient.translateStatus().then((s) => {
+        const next = { ...mtPending };
+        let changed = false;
+        waiting.forEach((n) => {
+          const job = [...(s.jobs || [])].reverse().find((j) => j.series_id === item.id && j.chapter === n);
+          if (!job) return;
+          if (job.status === "done") {
+            delete next[n]; changed = true;
+            if (chapterByName[n]) chapterByName[n].translated = true;
+            setMtData((d) => { const c = { ...d }; delete c[n]; return c; });
+            window.toast("Translation ready", "ok");
+          } else if (job.status === "error") {
+            delete next[n]; changed = true;
+            window.toast(`Translation failed: ${job.error || "unknown error"}`, "error");
+          } else if (next[n] !== job.message) { next[n] = job.message; changed = true; }
+        });
+        if (changed) setMtPending(next);
+      }).catch(() => {});
+    }, 4000);
+    return () => clearInterval(t);
+  }, [mtPending, item.id, chapterByName]);
+  function translateNow(name) {
+    window.ApiClient.translateChapter(item.id, name, true)
+      .then(() => { setMtPending((p) => ({ ...p, [name]: "Queued" })); window.toast("Translating this chapter, keep reading. It appears when ready.", "info"); })
+      .catch((e) => window.toast(`Couldn't start translation: ${e.message || e}`, "error"));
+  }
+  function mtFor(p) {
+    if (!mtOn || previewSource) return null;
+    const f = flat[p - 1];
+    const d = f && mtData[f.chapterName];
+    if (!d) return null;
+    const file = String(f.abs).replace(/\\/g, "/").split("/").pop();
+    return (d.pages || []).find((pg) => pg.file === file) || null;
+  }
 
   // Switch to an adjacent chapter without leaving the reader. dir = +1 next / -1 prev.
   function goChapter(dir) {
@@ -592,6 +747,8 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
   if (!item) return null;
 
   const cur = flat[page - 1] || {};
+  const curChForMt = cur.chapterName ? chapterByName[cur.chapterName] : null;
+  const showingMt = !!mtFor(page);
   const visible =
     mode === "vertical"
       ? flat.map((_, i) => i + 1)
@@ -609,10 +766,11 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
         <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {previewSource && <span className="reader-preview-tag">PREVIEW</span>}
-            {item.title}
+            {item.displayTitle || item.title}
           </div>
           <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", fontFamily: "var(--font-mono)" }}>
             {cur.chapterName ? `${cur.chapterName} · ` : ""}Page {page}/{total}
+            {showingMt && <span className="mt-tag" title="Unofficial machine translation">Unofficial translation</span>}
           </div>
         </div>
         <div className="reader-controls">
@@ -659,6 +817,18 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
             }}
           ><window.IconScissors size={13} /> End Chap Here</button>
           )}
+          {!previewSource && curChForMt && curChForMt.translated && (
+            <button className={"btn sm mt-toggle" + (mtOn ? " on" : "")} aria-pressed={mtOn} onClick={toggleMt}
+              title={mtOn ? "Showing the unofficial machine translation. Tap for the original." : "Showing the original. Tap for the unofficial machine translation."}>
+              {mtOn ? "EN (MT)" : "Original"}
+            </button>
+          )}
+          {!previewSource && curChForMt && !curChForMt.translated && window.isRawChapter && window.isRawChapter(curChForMt) && (
+            <button className="btn sm" disabled={!!mtPending[curChForMt.name]} onClick={() => translateNow(curChForMt.name)}
+              title="Machine-translate this chapter now (unofficial)">
+              {mtPending[curChForMt.name] ? mtPending[curChForMt.name] : "Translate"}
+            </button>
+          )}
           <div className="reader-mode-toggle">
             {[
               { id: "vertical", label: "縦 Vert" },
@@ -695,7 +865,7 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
             <p>No pages found for this series.</p>
           </div>
         ) : mode === "vertical" ? (
-          visible.map((p) => <PageImg key={p} p={p} flat={flat} mode={mode} previewSource={previewSource} />)
+          visible.map((p) => <PageImg key={p} p={p} flat={flat} mode={mode} previewSource={previewSource} mt={mtFor(p)} />)
         ) : (
           // key={page} remounts the wrapper on every turn so the slide-in
           // animation replays; the direction class picks which side it enters from.
@@ -719,11 +889,13 @@ function Reader({ item: itemProp, onClose, bg, startPage, endPage, resumePage, p
                 willChange: "transform",
               }}
             >
-              {visible.map((p) => <PageImg key={p} p={p} flat={flat} mode={mode} previewSource={previewSource} />)}
+              {visible.map((p) => <PageImg key={p} p={p} flat={flat} mode={mode} previewSource={previewSource} mt={mtFor(p)} />)}
             </div>
           </div>
         )}
       </div>
+
+      {showingMt && <div className="mt-banner" role="note">Unofficial machine translation</div>}
 
       {/* Bottom bar */}
       <div className="reader-bottom" onClick={(e) => e.stopPropagation()}>
@@ -902,7 +1074,7 @@ function SearchPanel({ onClose, onOpenDetail, onImportLink, onPreviewLink, initi
     let out = base.filter((c) => {
       if (terms.length) {
         const hay = [
-          c.title, c.author, c.series, c.language, c.notes,
+          c.title, c.alt_titles, c.author, c.series, c.language, c.notes,
           ...(c.tags || []), ...(c.genres || []),
         ].join(" ").toLowerCase();
         // Every term must appear somewhere (AND) so multi-word queries narrow.

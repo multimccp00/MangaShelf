@@ -1,0 +1,6 @@
+# Optional: machine translation of raw chapters (OCR + local LLM).
+# The LLM itself runs in Ollama and/or llama.cpp's llama-server, installed separately.
+rapidocr
+onnxruntime
+opencv-python-headless
+numpy

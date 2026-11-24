@@ -14,7 +14,7 @@ import time
 import urllib.parse
 import urllib.request
 
-from .base import ChapterMeta, MangaSource, SearchResult, SeriesMeta
+from .base import ALT_TITLES_SEARCH_ONLY, ChapterMeta, MangaSource, SearchResult, SeriesMeta
 
 _API = "https://api.mangadex.org"
 
@@ -121,6 +121,7 @@ class MangaDexSource(MangaSource):
         out: list[SearchResult] = []
         for r, titles in gathered[:limit]:
             r.match_score = _best_score(titles)
+            r.alt_titles = titles
             out.append(r)
         return out
 
@@ -245,12 +246,28 @@ class MangaDexSource(MangaSource):
                 cover_file = ra.get("fileName", "") or cover_file
 
         cover_url = f"{_UPLOADS}/covers/{mid}/{cover_file}" if cover_file else ""
-        chapter_list = self._fetch_feed(mid) if chapters else []
+        chapter_list = self._fetch_feed(mid, attr=attr) if chapters else []
+
+        # English name(s), so a romaji-titled series is still findable by its English
+        # title in the library (the display title above may be romaji/native).
+        english = [str(attr.get("title", {}).get("en") or "")]
+        english += [str(a.get("en")) for a in (attr.get("altTitles") or []) if a.get("en")]
+        # Skip names that are only part of the title (abbreviations like "1LDK+JK"):
+        # they add nothing to search and would make a poor display name.
+        alt_titles = [t for t in dict.fromkeys(english) if t and t.lower() not in title.lower()][:3]
+        # Every other name (romaji, native script, other languages) so the series
+        # can be found by any of them; listed after the marker so it's never shown.
+        others = [str(v) for v in (attr.get("title") or {}).values() if v]
+        others += [str(v) for a in (attr.get("altTitles") or []) for v in (a or {}).values() if v]
+        others = [t for t in dict.fromkeys(others) if t != title and t not in alt_titles][:15]
+        if others:
+            alt_titles += [ALT_TITLES_SEARCH_ONLY, *others]
 
         return SeriesMeta(
             source=self.name,
             external_id=mid,
             title=title,
+            alt_titles=alt_titles,
             author=author,
             genres=genres,
             tags=tags,
@@ -259,20 +276,47 @@ class MangaDexSource(MangaSource):
             chapters=chapter_list,
         )
 
-    def _fetch_feed(self, mid: str, lang: str = "en") -> list[ChapterMeta]:
-        """Readable chapters, ascending, de-duped per chapter number. Prefers
-        English, but if the series has NO English chapters (many don't — they're
-        translated to other languages) it FALLS BACK to whatever language actually
-        has the most chapters, rather than showing an empty list."""
-        chapters = self._feed_for_lang(mid, lang)
-        if chapters:
-            return chapters
-        # No English → find which languages this series is actually available in,
-        # and use the one with the most chapters.
-        best_lang = self._most_available_language(mid, exclude=lang)
-        if best_lang:
-            return self._feed_for_lang(mid, best_lang)
-        return []
+    # Per-chapter language priority: English, then European Portuguese, then
+    # Brazilian, then the raw original (ja/ko/zh…, for machine translation later).
+    # Portuguese is read as-is; only raw chapters are candidates for translation.
+    LANG_PRIORITY = ("en", "pt", "pt-br")
+    # Raw originals the translator handles. Nothing outside these languages is ever
+    # downloaded (no Spanish/Indonesian/... fallback): the owner reads en/pt only.
+    RAW_LANGS = ("ja", "ko", "zh", "zh-hk")
+
+    def _fetch_feed(self, mid: str, lang: str = "en", attr: dict | None = None) -> list[ChapterMeta]:
+        """Readable chapters, ascending, one per chapter number, each from the best
+        language available FOR THAT CHAPTER: English up to wherever it stops, then
+        pt / pt-br, then the raw original. So a series whose English ends at ch 40
+        still gets 41+ in Portuguese or raw instead of stopping. Other languages are
+        never used, so a series with none of these comes back empty."""
+        if attr is None:
+            try:
+                attr = _get(f"{_API}/manga/{mid}").get("data", {}).get("attributes", {}) or {}
+            except Exception:
+                attr = {}
+        avail = set(attr.get("availableTranslatedLanguages") or [])
+        orig = str(attr.get("originalLanguage") or "")
+        raw = [orig] if orig in self.RAW_LANGS else []
+        order = [L for L in dict.fromkeys([lang, *self.LANG_PRIORITY, *raw, *self.RAW_LANGS]) if L]
+        if avail:
+            order = [L for L in order if L in avail]
+        merged: dict[str, ChapterMeta] = {}
+        for L in order:
+            for c in self._feed_for_lang(mid, L):
+                key = c.number or ("#" + c.id)
+                if c.number and c.number in merged:
+                    continue                      # a better language already has it
+                if not c.number and merged:
+                    continue                      # unnumbered extras: first language only
+                merged[key] = c
+
+        def _num(c: ChapterMeta) -> tuple:
+            try:
+                return (0, float(c.number))
+            except (TypeError, ValueError):
+                return (1, 0.0)
+        return sorted(merged.values(), key=_num)
 
     def _feed_for_lang(self, mid: str, lang: str) -> list[ChapterMeta]:
         out: list[ChapterMeta] = []

@@ -50,6 +50,18 @@ function parseChapterName(name) {
 
 // One chapter card: cover, badges, label, and a hover edit button that opens an
 // inline editor for the chapter number + title (renames the folder on disk).
+// Language tag for a chapter: nothing for English/unknown, "PT"/"PT-BR" for
+// Portuguese, "RAW JA" for an untranslated original, "MT" once machine-translated.
+const RAW_LANGS = new Set(["ja", "ko", "zh", "zh-hk", "zh-ro", "ja-ro", "ko-ro"]);
+function langTag(ch) {
+  const L = (ch.language || "").toLowerCase();
+  if (!L || L === "en") return null;
+  if (ch.translated) return <span className="chapter-lang mt" title="Unofficial machine translation available">{" · "}MT</span>;
+  if (RAW_LANGS.has(L)) return <span className="chapter-lang raw" title="Untranslated original">{" · "}RAW {L.split("-")[0].toUpperCase()}</span>;
+  return <span className="chapter-lang">{" · "}{L.toUpperCase()}</span>;
+}
+window.isRawChapter = (ch) => RAW_LANGS.has((ch.language || "").toLowerCase());
+
 function ChapterCard({ ch, displayIndex, item, read, stColor, canEdit, onOpen, onRename, unavailable }) {
   const parsed = parseChapterName(ch.name);
   const [editing, setEditing] = useStateDtl(false);
@@ -112,7 +124,7 @@ function ChapterCard({ ch, displayIndex, item, read, stColor, canEdit, onOpen, o
       </div>
       <div className="chapter-meta">
         <span className="chapter-num">{ch.name.length > 14 ? `CH ${displayIndex + 1}` : ch.name}</span>
-        <span className="chapter-pages">{ch.page_count}p</span>
+        <span className="chapter-pages">{ch.page_count}p{langTag(ch)}</span>
       </div>
     </div>
   );
@@ -514,7 +526,7 @@ function Detail({ item: initialItem, libraries = [], refreshSignal, onBack, onMo
         <div className="detail-breadcrumb">
           <span className="muted">Library</span><span className="sep">/</span>
           {item.series && <><span className="muted">{item.series}</span><span className="sep">/</span></>}
-          <span>{item.title}</span>
+          <span>{item.displayTitle || item.title}</span>
         </div>
         <div style={{ flex: 1 }} />
         <div className="group" style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -610,7 +622,8 @@ function Detail({ item: initialItem, libraries = [], refreshSignal, onBack, onMo
         </div>
 
         <div className="detail-meta-pane">
-          <div className="detail-meta-head">
+          <div className={"detail-meta-head" + (item.title_en && item.title_en !== item.title ? " has-en" : "")}>
+            {item.title_en && item.title_en !== item.title && <h1 className="detail-h1 detail-title-en">{item.title_en}</h1>}
             <EditableTitle title={item.title} onSave={renameTitle} />
             <div className="detail-h-sub">
               <span className="kanji-tag" style={{ color: stColor }}>{item.kanji}</span>
@@ -734,6 +747,28 @@ function Detail({ item: initialItem, libraries = [], refreshSignal, onBack, onMo
                 </div>
               </InfoRow>
             )}
+
+            {/* Raw (ja/ko/zh) chapters: queue unofficial machine translation. */}
+            {(() => {
+              const raw = chapters.filter((c) => window.isRawChapter(c));
+              if (!raw.length) return null;
+              const done = raw.filter((c) => c.translated).length;
+              return (
+                <InfoRow label="Translation">
+                  <div className="detail-source">
+                    <span className="detail-source-link">{done}/{raw.length} raw chapters machine-translated</span>
+                    {done < raw.length && (
+                      <button className="btn ghost sm" title="Queue the rest for unofficial machine translation; they run while the PC is idle"
+                        onClick={() => window.ApiClient.translateSeries(item.id, false)
+                          .then((r) => window.toast(r.queued ? `Queued ${r.queued} chapter${r.queued === 1 ? "" : "s"}; they translate while the PC is idle.` : "Already queued.", "ok"))
+                          .catch((e) => window.toast(`Couldn't queue: ${e.message || e}`, "error"))}>
+                        Translate all
+                      </button>
+                    )}
+                  </div>
+                </InfoRow>
+              );
+            })()}
 
             {item.notes && (
               <InfoRow label="Notes"><div className="detail-field-value multiline" style={{flex:1}}>{item.notes}</div></InfoRow>

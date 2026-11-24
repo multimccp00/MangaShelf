@@ -181,6 +181,40 @@ function PreviewModal({ data, onClose, onReadChapter, onImport }) {
   );
 }
 
+// Secondary actions (reload / rescan / sync) live behind one "more" button so the
+// top bar reads as: where am I · search · filter · settings. Same popover surface
+// as the app's dropdowns (.dd-menu / .dd-item).
+function TopbarMore({ items }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("pointerdown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => { document.removeEventListener("pointerdown", onDown); document.removeEventListener("keydown", onKey); };
+  }, [open]);
+  return (
+    <div className="tb-more" ref={rootRef}>
+      <button type="button" className={"icon-btn tb-btn" + (open ? " on" : "")} title="More actions" aria-label="More actions"
+        aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
+        <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
+      </button>
+      {open && (
+        <div className="dd-menu tb-more-menu" role="menu">
+          {items.map((it) => (
+            <button type="button" role="menuitem" key={it.label} className="dd-item tb-more-item" title={it.title}
+              onClick={() => { setOpen(false); it.run(); }}>
+              {it.icon}<span>{it.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   // useTweaks is shimmed (tweaks-shim.jsx) — holds local UI prefs only.
   const [t, setTweak] = window.useTweaks({
@@ -191,6 +225,9 @@ function App() {
   });
 
   const [screen, setScreen] = useState("landing");
+  // Favorites-only Library view. Owned here so the Library/Favorites tabs can
+  // switch it (and show which one is active) while the Library is open.
+  const [favOnly, setFavOnly] = useState(false);
   const [reader, setReader] = useState(null);     // { item, startPage }
   const [detail, setDetail] = useState(null);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -253,8 +290,12 @@ function App() {
   // Tag filter: the list lives in settings; the switch hides/shows matching series.
   const [hideTagged, setHideTagged] = useState(window.Settings.hideTagged);
   const [hiddenCount, setHiddenCount] = useState((window.Settings.hiddenTags || []).length);
+  // Away from home the server forces the filter on; the switches disappear entirely.
+  const [tagsLocked, setTagsLocked] = useState(!!window.Settings.tagsLocked);
   async function applyTagFilter(patch) {
     await window.Settings.set(patch);
+    await window.Settings.loadFromServer();     // pick up the lock + auto-hide state
+    setTagsLocked(!!window.Settings.tagsLocked);
     setHideTagged(window.Settings.hideTagged);
     setHiddenCount((window.Settings.hiddenTags || []).length);
     await reload();
@@ -334,10 +375,12 @@ function App() {
           !(await window.Offline.probe()) && await showDeviceCopy()) return;
       // Pull authoritative settings from the server first so the startup choice
       // (default vs last-used) reflects saved preferences, not stale cache.
+      await window.resolvePublicIp();   // before any call, so the server knows home vs away
       await window.Settings.loadFromServer();
       setShowSwitcher(window.Settings.showSwitcher);
       setHidePrivate(window.Settings.hidePrivate);
       setHideTagged(window.Settings.hideTagged);
+      setTagsLocked(!!window.Settings.tagsLocked);
       setHiddenCount((window.Settings.hiddenTags || []).length);
       const libs = await window.ApiClient.listLibraries();
       setLibraries(libs);
@@ -534,32 +577,46 @@ function App() {
     return <LoginScreen onLoggedIn={onLoggedIn} />;
   }
 
-  // One-tap switch for the hidden-tags filter (only when some tags are listed).
-  const tagFilterBtn = hiddenCount > 0 ? (
-    <button className={"btn ghost sm tag-filter-btn" + (hideTagged ? " on" : "")}
-      title={hideTagged ? "Series with your hidden tags are filtered out. Click to show everything." : "Everything is showing. Click to hide series with your hidden tags."}
+  // Top-bar version of the filter switch: icon only (state shown by tint + eye-off),
+  // 40px tap target, no label so the bar stays one calm row on tablets.
+  const tagToggleIcon = hiddenCount > 0 && !tagsLocked ? (
+    <button type="button" className={"icon-btn tb-btn tb-tags" + (hideTagged ? " on" : "")}
+      title={hideTagged ? "Hiding series with your hidden tags — tap to show everything" : "Showing everything — tap to hide series with your hidden tags"}
+      aria-label={hideTagged ? "Hidden tags are filtered out. Show everything" : "Everything is showing. Hide series with hidden tags"}
       aria-pressed={hideTagged}
       onClick={() => applyTagFilter({ hideTagged: !hideTagged })}>
-      {hideTagged ? <window.IconEyeOff size={13} /> : <window.IconEye size={13} />} {hideTagged ? "Hiding tagged" : "Showing all"}
+      {hideTagged ? <window.IconEyeOff size={16} /> : <window.IconEye size={16} />}
     </button>
   ) : null;
+  function syncAll() {
+    window.ApiClient.resyncAll()
+      .then((r) => window.toast(
+        r.queued ? `Checking ${r.queued} series across all libraries for new chapters…` : "Nothing to check: no imported series, or all already queued.",
+        r.queued ? "ok" : "info"))
+      .catch((e) => window.toast(`Sync failed: ${e.message || e}`, "error"));
+  }
+  const moreItems = [
+    { label: "Refresh", title: "Reload from database", icon: <window.IconCycle size={14} />, run: reload },
+    { label: "Rescan folders", title: "Rescan folders on disk / add a library", icon: <window.IconSearch size={14} />, run: () => setRescanOpen(true) },
+    { label: "Check all for new chapters", title: "Check every imported series in every library for new chapters", icon: <window.IconCycle size={14} />, run: syncAll },
+  ];
 
   return (
-    <div className={"app" + (t.grain ? " grain" : "")}>
+    <div className={"app" + (t.grain ? " grain" : "") + ((importCh.active && importCh.status) || (moveCh.active && moveCh.status) ? " has-bg-job" : "")}>
       <main className="workspace">
         {window.OfflinePills && <window.OfflinePills />}
         {/* The landing screen has its own centered search and nav, so the topbar
             is redundant there — only show it on the other screens. */}
         {screen !== "landing" && (
           <header className="topbar">
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button className="btn ghost sm" style={screen === "landing" ? { background: "var(--ink-2)", color: "white" } : {}} onClick={() => setScreen("landing")}>Home</button>
-              <button className="btn ghost sm" style={screen === "library" ? { background: "var(--ink-2)", color: "white" } : {}} onClick={() => setScreen("library")}>Library</button>
-              <button className="btn ghost sm" onClick={() => { window.STORE._favOnly = true; setScreen("library"); }}>Favorites</button>
+            <nav className="tb-nav" aria-label="Sections">
+              <button className={"tb-tab" + (screen === "landing" ? " on" : "")} onClick={() => setScreen("landing")}>Home</button>
+              <button className={"tb-tab" + (screen === "library" && !favOnly ? " on" : "")} onClick={() => { setFavOnly(false); setScreen("library"); }}>Library</button>
+              <button className={"tb-tab" + (screen === "library" && favOnly ? " on" : "")} onClick={() => { setFavOnly(true); setScreen("library"); }}>Favorites</button>
               {window.Offline && window.Offline.supported && (
-                <button className="btn ghost sm" style={screen === "downloaded" ? { background: "var(--ink-2)", color: "white" } : {}} onClick={() => setScreen("downloaded")}>Downloaded</button>
+                <button className={"tb-tab" + (screen === "downloaded" ? " on" : "")} onClick={() => setScreen("downloaded")}>Downloaded</button>
               )}
-            </div>
+            </nav>
 
             {/* Flexible spacers center the search bar (stretch on both sides). */}
             <div className="topbar-spacer" style={{ flex: 1 }} />
@@ -571,21 +628,14 @@ function App() {
             </div>
             <div className="topbar-spacer" style={{ flex: 1 }} />
 
-            <button className="btn ghost sm refresh-btn" title="Reload from database" onClick={reload}><window.IconCycle size={13} /> Refresh</button>
-            <button className="btn ghost sm rescan-btn" title="Rescan folders on disk / add a library" onClick={() => setRescanOpen(true)}><window.IconSearch size={13} /> Rescan</button>
-            <button className="btn ghost sm syncall-btn" title="Check every imported series for new chapters"
-              onClick={() => {
-                window.ApiClient.resyncAll()
-                  .then((r) => window.toast(
-                    r.queued
-                      ? `Checking ${r.queued} series for new chapters…`
-                      : "No imported series to sync in this library.",
-                    r.queued ? "ok" : "info"))
-                  .catch((e) => window.toast(`Sync failed: ${e.message || e}`, "error"));
-              }}><window.IconCycle size={13} /> Sync</button>
-            {tagFilterBtn}
-            <button className="btn ghost sm settings-btn" title="Settings & libraries"
-              onClick={() => setSettingsOpen(true)}><window.IconGear size={13} /> Settings</button>
+            <div className="tb-tools">
+              {tagToggleIcon}
+              <button type="button" className="icon-btn tb-btn" title="Check every series in every library for new chapters"
+                aria-label="Check all series for new chapters" onClick={syncAll}><window.IconCycle size={16} /></button>
+              <TopbarMore items={moreItems} />
+              <button type="button" className="icon-btn tb-btn settings-btn" title="Settings & libraries" aria-label="Settings"
+                onClick={() => setSettingsOpen(true)}><window.IconGear size={16} /></button>
+            </div>
             {/* "From link" button removed — importing by URL still works by pasting
                 a link into the search bar (landing or overlay). */}
           </header>
@@ -599,10 +649,10 @@ function App() {
             <div className="empty"><p>Loading library…</p></div>
           )}
           {loaded && screen === "landing" && (
-            <window.Landing filterBtn={tagFilterBtn} tick={tick} onOpenDetail={openDetail} onOpenSearch={openSearch} onImportLink={openAddLink} onBrowse={() => { setScreen("library"); scrollTop(); }} density={t.density} />
+            <window.Landing tick={tick} onOpenDetail={openDetail} onOpenSearch={openSearch} onImportLink={openAddLink} onBrowse={() => { setFavOnly(false); setScreen("library"); scrollTop(); }} density={t.density} />
           )}
           {loaded && screen === "library" && (
-            <window.Library onOpenDetail={openDetail} onOpenSearch={openSearch} density={t.density} setDensity={(d) => setTweak("density", d)} />
+            <window.Library favOnly={favOnly} setFavOnly={setFavOnly} onOpenDetail={openDetail} onOpenSearch={openSearch} density={t.density} setDensity={(d) => setTweak("density", d)} />
           )}
           {loaded && screen === "profile" && (
             <window.Profile
@@ -704,6 +754,7 @@ function App() {
           hidePrivate={hidePrivate}
           onTagFilter={applyTagFilter}
           hideTagged={hideTagged}
+          tagsLocked={tagsLocked}
           onHidePrivate={(v) => {
             setHidePrivate(v);
             // Turning it ON while INSIDE a private library would leave hidden
@@ -915,13 +966,14 @@ function LibrarySwitcher({ libraries, activeLib, onSwitch, onOpenSettings, onOpe
 
 // ---------------------------------------------------------------------------
 // A small iOS-style toggle switch.
-function Toggle({ checked, onChange }) {
+function Toggle({ checked, onChange, disabled }) {
   return (
     <button
       type="button"
       className={"toggle" + (checked ? " on" : "")}
       role="switch"
       aria-checked={checked}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
     >
       <span className="toggle-knob" />
@@ -936,6 +988,9 @@ window.Toggle = Toggle;   // reused by the Offline settings (separate bundle sco
 // while a long download or move runs. Dismissing only hides it — the server keeps
 // working — but we keep it up until the job finishes so you don't lose track.
 function BackgroundJob({ kind, title, status, titlesById, onDismiss, onCancel }) {
+  // The queue list opens on hover (mouse) or by tapping the +N badge (touch,
+  // where "hover" would stick open and cover the page).
+  const [listOpen, setListOpen] = useState(false);
   const label = kind === "move" ? "Moving" : kind === "resync" ? "Updating" : kind === "tags" ? "Refreshing tags" : "Importing";
   const error = status && status.error;
   const warning = status && status.warning;   // finished, but some pages failed
@@ -955,7 +1010,7 @@ function BackgroundJob({ kind, title, status, titlesById, onDismiss, onCancel })
   const activeName = (status && status.title) || title || "";
 
   return (
-    <div className={"bg-job" + (error ? " error" : finished ? (warning ? " warn" : " done") : "") + (queued > 0 ? " has-queue" : "")}
+    <div className={"bg-job" + (error ? " error" : finished ? (warning ? " warn" : " done") : "") + (queued > 0 ? " has-queue" : "") + (listOpen ? " list-open" : "")}
          role="status" aria-live="polite">
       {queued > 0 && (
         <div className="bg-job-queuelist">
@@ -985,7 +1040,11 @@ function BackgroundJob({ kind, title, status, titlesById, onDismiss, onCancel })
           <div className="bg-job-title">{error ? "Failed" : finished ? (warning ? "Done, with issues" : "Done") : label}{activeName ? ` · ${activeName}` : ""}</div>
           <div className="bg-job-msg">{error ? error : (status.message || "")}</div>
         </div>
-        {queued > 0 && <span className="bg-job-queue" title={`${queued} waiting — hover to see the queue`}>+{queued}</span>}
+        {queued > 0 && (
+          <button type="button" className="bg-job-queue" aria-expanded={listOpen}
+            title={`${queued} waiting. Tap to ${listOpen ? "hide" : "show"} the queue`}
+            onClick={() => setListOpen((v) => !v)}>+{queued}</button>
+        )}
         <button className="icon-btn sm" onClick={onDismiss} title="Hide"><window.IconClose size={14} /></button>
       </div>
       {!finished && total > 0 && (
@@ -1138,7 +1197,69 @@ function SourceExtensionsModal({ onClose }) {
 
 // ---------------------------------------------------------------------------
 // Settings + library management modal.
-function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged, onSwitch, onShowSwitcher, hidePrivate: hidePrivateProp, onHidePrivate, onTagFilter, hideTagged: hideTaggedProp }) {
+// Settings: unofficial machine translation of raw (ja/ko/zh) chapters.
+const IDLE_CHOICES = { "Right away": 0, "After 5 min idle": 5, "After 10 min idle": 10, "After 30 min idle": 30 };
+function TranslationSettings() {
+  const [st, setSt] = useState(null);          // /api/settings snapshot (mt* keys)
+  const [models, setModels] = useState([]);
+  const [queue, setQueue] = useState(null);
+  function refresh() {
+    window.ApiClient.translateStatus().then(setQueue).catch(() => {});
+  }
+  useEffect(() => {
+    window.ApiClient.translateModels().then((r) => setModels(r.models || [])).catch(() => {});
+    setSt({ mtAuto: window.Settings.mtAuto !== false, mtModel: window.Settings.mtModel || "gemma3:12b",
+            mtIdleMinutes: window.Settings.mtIdleMinutes ?? 10 });
+    refresh();
+    const t = setInterval(refresh, 5000);
+    return () => clearInterval(t);
+  }, []);
+  if (!st) return null;
+  function set(patch) { setSt({ ...st, ...patch }); window.Settings.set(patch); }
+  const idleLabel = Object.keys(IDLE_CHOICES).find((k) => IDLE_CHOICES[k] === st.mtIdleMinutes) || "After 10 min idle";
+  const running = queue && queue.jobs.find((j) => j.status === "running" || j.status === "waiting");
+  return (
+    <div className="settings-section">
+      <div className="settings-section-title">Translation</div>
+      <div className="settings-section-hint">Raw Japanese, Korean and Chinese chapters can be machine-translated on this PC. The English is shown over the original page and marked as an unofficial translation; the images are never changed.</div>
+      {queue && !queue.available && (
+        <div className="settings-section-hint">Text recognition isn't installed on the server, so translation is unavailable.</div>
+      )}
+      <div className="settings-toggle-row">
+        <div className="settings-toggle-label">
+          <div>Translate new raw chapters automatically</div>
+          <div className="settings-toggle-hint">After an import or update, raw chapters are queued and translated in the background.</div>
+        </div>
+        <Toggle checked={!!st.mtAuto} onChange={(v) => set({ mtAuto: v })} />
+      </div>
+      <div className="settings-toggle-row">
+        <div className="settings-toggle-label">
+          <div>When to run</div>
+          <div className="settings-toggle-hint">Waits for no keyboard or mouse input (and a free GPU), so it won't slow down games. "Translate" in the reader always runs right away.</div>
+        </div>
+        <window.Dropdown value={idleLabel} options={Object.keys(IDLE_CHOICES)} onChange={(k) => set({ mtIdleMinutes: IDLE_CHOICES[k] })} width={170} />
+      </div>
+      <div className="settings-toggle-row">
+        <div className="settings-toggle-label">
+          <div>Model</div>
+          <div className="settings-toggle-hint">Local Ollama model. If it fails, a fallback model is tried.</div>
+        </div>
+        <window.Dropdown value={st.mtModel} options={models.length ? models : [st.mtModel]} onChange={(m) => set({ mtModel: m })} width={220} />
+      </div>
+      {queue && queue.pending > 0 && (
+        <div className="settings-toggle-row">
+          <div className="settings-toggle-label">
+            <div>{queue.pending} chapter{queue.pending === 1 ? "" : "s"} in the queue</div>
+            <div className="settings-toggle-hint">{running ? `${running.title} / ${running.chapter}: ${running.message}` : "Waiting to start"}</div>
+          </div>
+          <button className="btn ghost sm" onClick={() => window.ApiClient.clearTranslateQueue().then(refresh)}>Cancel queued</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged, onSwitch, onShowSwitcher, hidePrivate: hidePrivateProp, onHidePrivate, onTagFilter, hideTagged: hideTaggedProp, tagsLocked }) {
   const [startMode, setStartMode] = useState(window.Settings.startMode);
   const [confirmPrivate, setConfirmPrivate] = useState(window.Settings.confirmPrivate);
   const [showSwitcher, setShowSwitcher] = useState(window.Settings.showSwitcher);
@@ -1322,14 +1443,21 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
             <div className="settings-toggle-row">
               <div className="settings-toggle-label">
                 <div>Hide these tags</div>
-                <div className="settings-toggle-hint">Also available as the eye button in the top bar, for a quick switch in public.</div>
+                <div className="settings-toggle-hint">{tagsLocked ? "Locked on while you're away from home." : "Also available as the eye button in the top bar, for a quick switch in public."}</div>
               </div>
-              <Toggle checked={!!hideTaggedProp} onChange={(v) => onTagFilter({ hideTagged: v })} />
+              <Toggle checked={!!hideTaggedProp} disabled={tagsLocked} onChange={(v) => onTagFilter({ hideTagged: v })} />
             </div>
             <div className="settings-toggle-row">
               <div className="settings-toggle-label">
-                <div>Refresh tags from the source</div>
-                <div className="settings-toggle-hint">Series saved earlier may be missing tags the site has since added, so they can't be hidden yet. This reads each one's tags again (one quick request each, nothing is downloaded).</div>
+                <div>Always hide when away from home</div>
+                <div className="settings-toggle-hint">Away means anywhere but this PC or your home network (including Tailscale). Back home, the switch returns to how you left it.</div>
+              </div>
+              <Toggle checked={window.Settings.awayAutoHide !== false} disabled={tagsLocked} onChange={(v) => onTagFilter({ awayAutoHide: v })} />
+            </div>
+            <div className="settings-toggle-row">
+              <div className="settings-toggle-label">
+                <div>Refresh tags and names from the source</div>
+                <div className="settings-toggle-hint">Series saved earlier may be missing tags the site has since added, or their English and other-language names. This reads them again (one quick request each, nothing is downloaded).</div>
               </div>
               <button className="btn ghost sm" disabled={refreshing} onClick={() => {
                 setRefreshing(true);
@@ -1349,6 +1477,8 @@ function SettingsModal({ libraries, activeLib, onClose, onAddLibrary, onChanged,
               />
             </div>
           </div>
+
+          <TranslationSettings />
 
           <div className="settings-section">
             <div className="settings-section-title">Behaviour</div>

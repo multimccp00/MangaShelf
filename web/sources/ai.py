@@ -250,8 +250,33 @@ def _render(url: str, scroll: bool = False) -> dict:
         # site's nav/footer links — at 400 a 439-chapter series silently lost its
         # first 60 chapters. Only a 6000-char SAMPLE is sent to the LLM; the full
         # list is what the learned regex is matched against.
-        links = page.eval_on_selector_all(
-            "a[href]", "els => els.slice(0,3000).map(e => [e.getAttribute('href'), (e.textContent||'').trim().slice(0,60)])")
+        links_js = ("els => els.slice(0,3000).map(e => [e.getAttribute('href'), "
+                    "(e.textContent||'').trim().slice(0,60)])")
+        links = page.eval_on_selector_all("a[href]", links_js)
+        if not scroll:
+            # Paginated chapter lists (comix.to: 20 per page, numbered buttons, same
+            # URL) only render page 1 — click through 2, 3, … and merge the links.
+            # Only numbered <button>s are clicked, so link-based pagers are untouched.
+            seen = {h for h, _ in links}
+            # JS click: ad overlays can intercept real pointer events. The button
+            # must sit beside a "1" button, so stat counters aren't mistaken for it.
+            click_js = ("n => { const b = [...document.querySelectorAll('button')].find(b => "
+                        "b.textContent.trim() === String(n) && [...b.parentElement.children]"
+                        ".some(c => c.textContent.trim() === '1')); "
+                        "if (b) b.click(); return !!b; }")
+            for n in range(2, 60):
+                try:
+                    if not page.evaluate(click_js, n):
+                        break
+                    page.wait_for_timeout(900)
+                except Exception:
+                    break
+                more = [l for l in page.eval_on_selector_all("a[href]", links_js)
+                        if l[0] not in seen]
+                if not more:
+                    break
+                seen.update(h for h, _ in more)
+                links += more
         # Read src plus common lazy attributes so nothing is missed.
         imgs = page.eval_on_selector_all(
             "img",
@@ -439,17 +464,18 @@ class GenericAISource(MangaSource):
             if full in seen:
                 continue
             seen.add(full)
+            # The href is the reliable number where it carries one (comix.to writes
+            # "chapter-16.5" while the link text is "Ch.16.5" + a stray "5").
+            hm = re.search(r"chapter[-_/]?(\d+)(?:[-_.](\d+))?", href, re.I)
+            hnum = (float(f"{hm.group(1)}.{hm.group(2)}") if hm.group(2) else float(hm.group(1))) if hm else None
+            if hnum == 0 and not re.match(r"ch", text, re.I):
+                continue    # volume row ("Vol.2 Volume 2" at .../chapter-0), not a chapter
             numm = re.search(r"(\d+(?:\.\d+)?)", text)
-            if numm:
-                num = float(numm.group(1))
-            else:
-                # Fall back to the href, where a fractional chapter is usually
-                # written with a separator rather than a point: chapter-32-5 = 32.5.
-                hm = re.search(r"chapter[-_/]?(\d+)(?:[-_.](\d+))?", href, re.I)
-                if hm:
-                    num = float(f"{hm.group(1)}.{hm.group(2)}") if hm.group(2) else float(hm.group(1))
-                else:
-                    num = 0.0
+            num = hnum if hnum is not None else (float(numm.group(1)) if numm else 0.0)
+            # Several scanlation groups list the same chapter: keep the first row.
+            if hnum is not None and ("n", hnum) in seen:
+                continue
+            seen.add(("n", hnum))
             out.append((num, full, text.strip()))
         return out
 

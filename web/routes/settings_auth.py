@@ -22,13 +22,23 @@ router = APIRouter()
 def get_settings() -> dict[str, Any]:
     """App preferences, server-stored so they persist across browser-storage
     clears and sync between devices."""
-    return api._load_settings()
+    st = api._load_settings()
+    # Away from home the filter is forced on. Report that WITHOUT touching the saved
+    # value, so back at home the toggle returns to the last state the user chose.
+    if api._tags_locked(st):
+        st = {**st, "hideTagged": True, "tagsLocked": True}
+    return st
 
 
 @router.post("/api/settings", dependencies=[Depends(require_token)])
 def update_settings(body: dict[str, Any]) -> dict[str, Any]:
     """Merge in changed preference keys (unknown keys ignored)."""
-    return api._save_settings(body or {})
+    body = dict(body or {})
+    if api._tags_locked():
+        body.pop("hideTagged", None)    # can't be switched off away from home
+        body.pop("hiddenTags", None)    # nor edited to empty the list
+        body.pop("awayAutoHide", None)  # nor can auto-hide itself be disabled
+    return api._save_settings(body)
 
 
 # ----------------------------------------------------------------- auth API --

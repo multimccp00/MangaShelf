@@ -15,7 +15,6 @@ const _libView = {
   status: "All",
   language: "All Languages",
   parody: "All Parodies",
-  favOnly: false,
   limit: 0,   // how many cards were expanded via "Load more" — restored so the
               // page is tall enough to return to the same scroll position
 };
@@ -25,14 +24,14 @@ function _libViewFor(libId) {
     Object.assign(_libView, {
       libId, sort: "Title A-Z", genre: "All Genres", author: "All Authors",
       seriesF: "All Series", tag: "All Tags", status: "All",
-      language: "All Languages", parody: "All Parodies", favOnly: false, limit: 0,
+      language: "All Languages", parody: "All Parodies", limit: 0,
     });
   }
   return _libView;
 }
 
 // Landing — centered search, Continue Reading rail, New Reads rail.
-function Landing({ filterBtn, onOpenDetail, onOpenSearch, onImportLink, onBrowse, density }) {
+function Landing({ onOpenDetail, onOpenSearch, onImportLink, onBrowse, density }) {
   const [q, setQ] = useStateScr("");
   const [delTick, setDelTick] = useStateScr(0);   // bump to re-render after a delete
   const items = window.STORE.items;
@@ -82,7 +81,6 @@ function Landing({ filterBtn, onOpenDetail, onOpenSearch, onImportLink, onBrowse
         />
         <button className="btn primary" type="submit">Search</button>
       </form>
-      {filterBtn && <div className="landing-filter">{filterBtn}</div>}
 
       <section className="landing-section">
         <h2 className="landing-h">Continue Reading</h2>
@@ -112,7 +110,7 @@ function Landing({ filterBtn, onOpenDetail, onOpenSearch, onImportLink, onBrowse
 const PAGE_SIZE = 60;
 
 // Library — filter/sort over the real library.
-function Library({ onOpenDetail, onOpenSearch, density, setDensity }) {
+function Library({ onOpenDetail, onOpenSearch, density, setDensity, favOnly, setFavOnly }) {
   // Seed filters from the persisted view (kept across detail open/close), scoped
   // to the active library. Each setter mirrors its value back into _libView so
   // the next remount restores it.
@@ -141,14 +139,7 @@ function Library({ onOpenDetail, onOpenSearch, density, setDensity }) {
   // Restore how far the list was expanded (for scroll restore on "back").
   const [limit, setLimitRaw] = useStateScr(v.limit && v.limit > PAGE_SIZE ? v.limit : PAGE_SIZE);
   const setLimit = mk("limit", setLimitRaw);
-  // Favorites-only view. The nav "Favorites" button sets window.STORE._favOnly;
-  // if that flag is set we force it on (and clear the flag); otherwise restore
-  // the remembered value. Persisted like the other filters.
-  const [favOnly, setFavOnlyRaw] = useStateScr(() => {
-    if (window.STORE._favOnly) { window.STORE._favOnly = false; _libView.favOnly = true; return true; }
-    return v.favOnly;
-  });
-  const setFavOnly = mk("favOnly", setFavOnlyRaw);
+  // favOnly (Favorites-only view) comes from the app: the nav tabs set it.
 
   const all = window.STORE.items;
   const facets = window.STORE.facets;

@@ -7,6 +7,7 @@ from typing import Any
 APP_DIR = Path.home() / ".mangashelf"
 DB_PATH = APP_DIR / "mangashelf.db"
 
+ALT_SEP = chr(10)   # alt_titles column holds one name per line
 READING_STATUSES = ["Not Started", "Reading", "Completed", "On Hold", "Dropped", "Planned to Read"]
 DEFAULT_GENRES = [
     "Action",
@@ -174,6 +175,9 @@ class Database:
             changed = True
         if "language" not in columns:
             self.conn.execute("ALTER TABLE series ADD COLUMN language TEXT")
+            changed = True
+        if "alt_titles" not in columns:     # other names (e.g. English), newline-joined; search only
+            self.conn.execute("ALTER TABLE series ADD COLUMN alt_titles TEXT")
             changed = True
         if "last_page" not in columns:
             self.conn.execute("ALTER TABLE series ADD COLUMN last_page INTEGER DEFAULT 0")
@@ -695,14 +699,14 @@ class Database:
                     "("
                     "LOWER(s.title) LIKE ? OR LOWER(COALESCE(s.series_name,'')) LIKE ? "
                     "OR LOWER(COALESCE(s.author,'')) LIKE ? OR LOWER(COALESCE(s.language,'')) LIKE ? "
-                    "OR LOWER(COALESCE(s.notes,'')) LIKE ? "
+                    "OR LOWER(COALESCE(s.notes,'')) LIKE ? OR LOWER(COALESCE(s.alt_titles,'')) LIKE ? "
                     "OR EXISTS (SELECT 1 FROM tags tt WHERE tt.series_id = s.id AND LOWER(tt.tag) LIKE ?) "
                     "OR EXISTS (SELECT 1 FROM series_genres sg2 JOIN genres g2 ON g2.id = sg2.genre_id "
                     "           WHERE sg2.series_id = s.id AND LOWER(g2.name) LIKE ?)"
                     ")"
                 )
                 needle = f"%{term}%"
-                params.extend([needle] * 7)
+                params.extend([needle] * 8)
 
         if filter_mode == "Favorites":
             where_parts.append("s.favorite = 1")
@@ -813,6 +817,9 @@ class Database:
         if "language" in sc:
             updates.append("language=?")
             params.append(str(sc["language"]).strip())
+        if "alt_titles" in sc:
+            updates.append("alt_titles=?")
+            params.append(ALT_SEP.join(str(a).strip() for a in (sc["alt_titles"] or []) if str(a).strip()))
         if "external_id" in sc:
             # Stored as a "<source>:<id>" string (e.g. "mangadex:<uuid>"); keep it
             # verbatim. (Was int-cast back when this column was the numeric

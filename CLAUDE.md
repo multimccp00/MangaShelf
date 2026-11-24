@@ -1,5 +1,13 @@
 # MangaShelf — working rules
 
+## Public repo
+- The repo is public: keep code, comments, UI text and docs neutral. Owner-specific prompt notes/glossary and model names go in `~/.mangashelf/mt_local.json`, never in the repo.
+
+## Machine translation (`web/translate.py`, `web/mt_batch.py`, `web/routes/translate_jobs.py`)
+- Changing OCR grouping, bubble detection or the prompt: bump `PIPELINE_VERSION` so existing translations are redone.
+- Check layout changes in the reader on a colour page, a black-and-white page and a Chinese page; English must stay inside bubbles and never paint over the artwork.
+- One LLM client at a time (Ollama reloads/stalls with two). Never import `web/api.py` from scripts: it starts a second copy of the import queue.
+
 ## UI / styling work
 - **Always run the `impeccable` skill** (via the Skill tool) before building or restyling any UI: new screens, buttons, menus, settings rows, popovers, cards. Don't style by eye.
 - Reuse the app's existing patterns first (`.btn`, `.btn.lg`, `.btn.primary`, `.dd-menu` / `.dd-item`, `.settings-toggle-row`, `.settings-lib-row`, `.card-action-btn`, `Toggle`, `Dropdown`). A new control that doesn't look like a sibling control is a bug.
